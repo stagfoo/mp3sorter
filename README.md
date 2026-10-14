@@ -200,6 +200,36 @@ plugin imports, so it tests with no device attached.
 **132 tests.** `tool/verify_bitrate.dart` and `tool/dry_run.dart` are not
 tests — they run against a real collection and need `ffprobe`.
 
+## Planning happens in two passes
+
+Where a file can go depends on which names will still be occupied
+afterwards, and that is not known until every track has been considered.
+So the planner first works out which files are staying put — already
+correctly named, or unfilable — claims those names, and only then assigns
+moves.
+
+The single-pass version shipped in 1.0.x and was wrong in a way that only
+showed up on a **rescan of an already-sorted folder**. A file already at
+its correct name was skipped without reserving that name, so the next file
+with identical tags was planned straight onto it:
+
+```
+Megitsune.mp3          already correct → skipped, name not claimed
+Megitsune (134k).mp3   → planned onto Megitsune.mp3   ← collides
+Megitsune (2).mp3      → planned onto Megitsune (134k).mp3  ← collides
+```
+
+On a real device that was 120 failures in one run. `validatePlan` now
+catches the whole class — a move aimed at a name something else is
+keeping — so it would fail the plan rather than the apply.
+
+A second fix came with it: disambiguation can hand a file back **its own**
+name, since a file already called `Title (134k).mp3` whose plain target is
+taken disambiguates to exactly where it already is. That produced
+move-to-self actions, which is why a second run over a tidy folder never
+settled. The plan now converges — verified on the real collection, where
+a second pass finds zero moves.
+
 ## A bug this app shipped with, and how it looked
 
 On a real device the first run worked, and then the screen said **0

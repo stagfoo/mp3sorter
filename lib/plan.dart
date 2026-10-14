@@ -72,6 +72,7 @@ class Plan {
     required this.trashes,
     required this.artistMerges,
     required this.unsortable,
+    this.stationaryPaths = const {},
   });
 
   final List<PlannedAction> moves;
@@ -88,6 +89,16 @@ class Plan {
   /// are. Reported rather than dumped somewhere, because a folder called
   /// `_unsorted` that silently accumulates is how things get lost.
   final List<Track> unsortable;
+
+  /// Paths occupied by files that are *not* moving — because they are
+  /// already where they belong, or because nothing could be worked out
+  /// about them.
+  ///
+  /// Carried on the plan so [validatePlan] can catch a move aimed at an
+  /// occupied name. Without it, a file already correctly named looks
+  /// invisible to the planner and the next file with the same tags gets
+  /// planned straight on top of it.
+  final Set<String> stationaryPaths;
 
   int get actionCount => moves.length + retags.length + trashes.length;
   bool get isEmpty => actionCount == 0;
@@ -183,6 +194,10 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
   // Claimed target paths, so two tracks cannot be planned onto one name.
   final claimed = <String>{};
 
+  /// Tracks that can be filed, with the names to file them under.
+  /// Collected in the first pass and assigned targets in the second.
+  final wanted = <(Track, String, String, bool)>[];
+
   for (final track in tracks) {
     if (doomed.contains(track.path)) continue;
     if (!track.isReadable) {
@@ -223,32 +238,74 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
       }
     }
 
-    // ---- filing -----------------------------------------------------
-    if (!options.renameFiles) continue;
-
-    // Both halves are needed to file a track. A guess at one of them
-    // produces `Unknown Artist/Unknown Title.mp3`, which is worse than
-    // leaving the file alone: it destroys the one clue left, the
-    // original filename.
-    if (artist == null || artist.isEmpty || title == null || title.isEmpty) {
-      unsortable.add(track);
-      continue;
+    // Filing happens in a second pass below, because where a file can go
+    // depends on which names are already taken by files that are not
+    // moving — which is not known until every track has been considered.
+    if (options.renameFiles) {
+      if (artist == null ||
+          artist.isEmpty ||
+          title == null ||
+          title.isEmpty) {
+        // Both halves are needed to file a track. A guess at one of them
+        // produces `Unknown Artist/Unknown Title.mp3`, which is worse
+        // than leaving the file alone: it destroys the one clue left,
+        // the original filename.
+        unsortable.add(track);
+      } else {
+        wanted.add((track, artist, title, names.fromTags));
+      }
     }
+  }
 
+  // ---- filing, pass two ----------------------------------------------
+  //
+  // Two passes, and the reason is a bug this had in 1.0.x. A file already
+  // sitting at its correct name used to be skipped without reserving that
+  // name, so the next file with identical tags saw it as free, was
+  // planned straight onto it, and failed at apply time with "something
+  // already exists". On a collection rescanned after a previous run that
+  // cascaded: 120 failures in one go.
+  //
+  // So every name that will still be occupied afterwards is claimed
+  // first, and only then are moves assigned.
+  final stationary = <String>{};
+  for (final t in unsortable) {
+    stationary.add(t.path.toLowerCase());
+  }
+  for (final (track, artist, title, _) in wanted) {
+    final target = '${options.root}/${safeComponent(artist)}/'
+        '${safeComponent(title)}${_extensionOf(track.path)}';
+    if (target == track.path) stationary.add(target.toLowerCase());
+  }
+  claimed.addAll(stationary);
+
+  for (final (track, artist, title, fromTags) in wanted) {
     final extension = _extensionOf(track.path);
     var target = '${options.root}/${safeComponent(artist)}/'
         '${safeComponent(title)}$extension';
 
     if (target == track.path) continue;
 
+    // A name is free if nothing is staying there and nothing else has
+    // been assigned it. The file's own current path does not count as an
+    // obstacle — it is about to be vacated.
+    claimed.remove(track.path.toLowerCase());
     target = _disambiguate(target, extension, claimed, track);
     claimed.add(target.toLowerCase());
+
+    // Checked again, because disambiguation can hand a file back its own
+    // name: a file already called `Title (134k).mp3` whose plain target
+    // is taken disambiguates to exactly where it already is. Without
+    // this the plan contains a move from a path to itself, which is both
+    // noise in the review list and the reason a second run over an
+    // already-tidy folder never settles.
+    if (target == track.path) continue;
 
     moves.add(PlannedAction(
       kind: ActionKind.move,
       path: track.path,
       targetPath: target,
-      reason: names.fromTags
+      reason: fromTags
           ? 'from tags'
           : 'from the filename — tags were missing',
     ));
@@ -260,6 +317,7 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
     trashes: trashes,
     artistMerges: merges,
     unsortable: unsortable,
+    stationaryPaths: stationary,
   );
 }
 
@@ -355,6 +413,21 @@ List<PlanProblem> validatePlan(Plan plan) {
     if (twice.isNotEmpty) {
       problems.add(PlanProblem('planned twice as ${kind.name}', twice));
     }
+  }
+
+  // A move aimed at a name something else is keeping. This is the check
+  // that would have caught the 1.0.x planner bug before it reached a
+  // device rather than after.
+  final ontoOccupied = [
+    for (final m in plan.moves)
+      if (plan.stationaryPaths.contains(m.targetPath!.toLowerCase()))
+        m.path,
+  ];
+  if (ontoOccupied.isNotEmpty) {
+    problems.add(PlanProblem(
+      'would be moved onto a file that is staying put',
+      ontoOccupied,
+    ));
   }
 
   // A file both moved and thrown away.

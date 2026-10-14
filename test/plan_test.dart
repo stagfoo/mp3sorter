@@ -395,6 +395,87 @@ void main() {
       expect(noTags.retags, isEmpty);
     });
 
+    group('rescanning a folder that has already been sorted', () {
+      // The app files into a _sorted subfolder, so on a rescan that is
+      // the plan root and the already-filed tracks sit directly under it.
+      const sortedOpts = PlanOptions(root: '/music/_sorted');
+      // The 1.0.x bug, reproduced. A previous run left three files with
+      // the same tags under disambiguated names. Rescanning planned the
+      // suffixed ones straight onto the plain one, which was skipped
+      // without reserving its name — and every move failed at apply time
+      // with "something already exists". 120 of them on a real device.
+      final alreadySorted = [
+        t('/music/_sorted/Babymetal/Megitsune.mp3',
+            artist: 'Babymetal', title: 'Megitsune', bitrate: 320,
+            fingerprint: 'f1'),
+        t('/music/_sorted/Babymetal/Megitsune (134k).mp3',
+            artist: 'Babymetal', title: 'Megitsune', bitrate: 134,
+            fingerprint: 'f2'),
+        t('/music/_sorted/Babymetal/Megitsune (2).mp3',
+            artist: 'Babymetal', title: 'Megitsune', bitrate: 192,
+            fingerprint: 'f3'),
+      ];
+
+      test('nothing is planned onto the file that is staying put', () {
+        final p = buildPlan(alreadySorted, sortedOpts);
+        const settled = '/music/_sorted/babymetal/megitsune.mp3';
+        for (final m in p.moves) {
+          expect(m.targetPath!.toLowerCase(), isNot(settled),
+              reason: '${m.path} would land on a file that is not moving');
+        }
+      });
+
+      test('the already-correct file is recorded as staying', () {
+        final p = buildPlan(alreadySorted, sortedOpts);
+        expect(p.stationaryPaths,
+            contains('/music/_sorted/babymetal/megitsune.mp3'));
+      });
+
+      test('every target is distinct', () {
+        final p = buildPlan(alreadySorted, sortedOpts);
+        final targets =
+            p.moves.map((m) => m.targetPath!.toLowerCase()).toList();
+        expect(targets.toSet().length, targets.length);
+      });
+
+      test('the plan validates clean', () {
+        expect(validatePlan(buildPlan(alreadySorted, sortedOpts)), isEmpty);
+      });
+
+      test('a second run over the result changes nothing', () {
+        // Convergence. A tidier that keeps finding work on an already
+        // tidy folder is one you stop trusting.
+        final first = buildPlan(alreadySorted, sortedOpts);
+        final after = <Track>[];
+        for (final track in alreadySorted) {
+          final move = first.moves
+              .where((m) => m.path == track.path)
+              .cast<PlannedAction?>()
+              .firstWhere((_) => true, orElse: () => null);
+          after.add(move == null
+              ? track
+              : t(move.targetPath!,
+                  artist: track.artist,
+                  title: track.title,
+                  bitrate: track.bitrateKbps,
+                  fingerprint: track.audioFingerprint));
+        }
+        expect(buildPlan(after, sortedOpts).moves, isEmpty);
+      });
+    });
+
+    test('a file may move onto a name another file is vacating', () {
+      // The conservative fix would be to treat every current path as
+      // occupied, which would suffix files needlessly on a reorganise.
+      final p = buildPlan([
+        t('/music/_sorted/A/One.mp3', artist: 'A', title: 'Two'),
+        t('/music/_sorted/A/Two.mp3', artist: 'A', title: 'Three'),
+      ], const PlanOptions(root: '/music/_sorted'));
+      final targets = p.moves.map((m) => m.targetPath).toList();
+      expect(targets, contains('/music/_sorted/A/Two.mp3'));
+      expect(targets.every((x) => !x!.contains('(2)')), isTrue);
+    });
+
     test('an empty collection plans nothing', () {
       expect(buildPlan(const [], opts).isEmpty, isTrue);
     });

@@ -69,6 +69,24 @@ void main(List<String> args) async {
   for (final pr in problems.take(5)) {
     print('    !! ${pr.message}: ${pr.paths.take(2).join(", ")}');
   }
+  // Convergence: apply the plan on paper, re-plan, and expect nothing
+  // left to do. A tidier that keeps finding work on an already-tidy
+  // folder is one you stop trusting — and it is exactly how two
+  // collision bugs reached a device.
+  final movedBy = {for (final m in plan.moves) m.path: m.targetPath!};
+  final after = [
+    for (final t in scan.tracks)
+      movedBy.containsKey(t.path) ? t.copyWith(path: movedBy[t.path]) : t,
+  ];
+  final second = buildPlan(after,
+      PlanOptions(root: '${root.path}/_sorted', removeDuplicates: false));
+  print('  second pass: ${second.moves.length} moves, '
+      '${second.retags.length} retags  '
+      '${second.moves.isEmpty ? "(converged)" : "!! DOES NOT CONVERGE"}');
+  for (final m in second.moves.take(4)) {
+    print('    !! ${m.path} -> ${m.targetPath}');
+  }
+
   print('\n  sample moves:');
   for (final m in plan.moves.take(6)) {
     print('    ${m.path.split('/').last}');
