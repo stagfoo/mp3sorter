@@ -496,29 +496,30 @@ QualityBand bandFor(int bitrateKbps, {bool isVbr = false, int? sampleRate}) {
   return QualityBand.high;
 }
 
-/// The genre string written to mark a poor file.
+/// A marker earlier versions of this app wrote into the genre field.
 ///
-/// Genre, because it is the only writable free-text list the tag library
-/// exposes — there is no comment setter. It reads acceptably in a player's
-/// genre column, it is obvious what put it there, and removing it is a
-/// matter of deleting one genre rather than rewriting a field.
+/// **Nothing writes it any more, and that was the right call.** Bitrate
+/// is derived from the file in about two milliseconds, so storing it cost
+/// a real metadata field to save a computation that is free — and it
+/// overwrote genres the owner had actually set. Quality is now computed
+/// at scan time, shown, and filtered on; it is never persisted.
+///
+/// The constant survives only so the marker can be *taken back* from
+/// files that already carry one.
 const String kLowQualityTag = 'low quality';
 
-/// Marker genres this app manages, so a re-run replaces rather than
-/// accumulates. Without this, scanning three times leaves three copies.
+/// Markers this app has ever written, matched case- and space-insensitively.
 const Set<String> kManagedTags = {kLowQualityTag};
 
-/// The genre list a file should end up with.
+/// Whether a genre list carries a marker this app put there.
+bool hasQualityTag(List<String> genres) =>
+    genres.any((g) => kManagedTags.contains(g.trim().toLowerCase()));
+
+/// The genre list with this app's markers removed and nothing added.
 ///
-/// Returns the existing genres with any stale marker removed, plus the
-/// marker if it is currently warranted. Order is otherwise preserved: the
-/// user's own genres are theirs, and reordering them would show up as a
-/// spurious change on every file.
-List<String> applyQualityTag(List<String> existing, QualityBand band) {
-  final kept = [
-    for (final g in existing)
-      if (!kManagedTags.contains(g.trim().toLowerCase())) g,
-  ];
-  if (band == QualityBand.low) kept.add(kLowQualityTag);
-  return kept;
-}
+/// Order is otherwise preserved — the genres are the owner's, and
+/// reordering them would show up as a spurious change on every file.
+List<String> stripQualityTags(List<String> existing) => [
+      for (final g in existing)
+        if (!kManagedTags.contains(g.trim().toLowerCase())) g,
+    ];

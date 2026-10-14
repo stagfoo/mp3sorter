@@ -23,6 +23,7 @@ class Track {
     this.bitrateKbps,
     this.isVbr = false,
     this.sampleRate,
+    this.channels,
     this.duration,
     this.audioFingerprint,
     this.readError,
@@ -41,6 +42,7 @@ class Track {
   final int? bitrateKbps;
   final bool isVbr;
   final int? sampleRate;
+  final int? channels;
   final Duration? duration;
 
   /// A cheap identity for the *audio*, ignoring tags.
@@ -68,6 +70,10 @@ class Track {
 
   bool get isLowQuality => band == QualityBand.low;
 
+  /// A mono file is not necessarily bad, but on music it usually means a
+  /// poor source, so it is worth showing beside the bitrate.
+  bool get isMono => channels == 1;
+
   /// The filename with no directory and no extension — the fallback when
   /// tags are missing, and often the only thing a loose file has.
   String get stem {
@@ -94,6 +100,7 @@ class Track {
         bitrateKbps: bitrateKbps,
         isVbr: isVbr,
         sampleRate: sampleRate,
+        channels: channels,
         duration: duration,
         audioFingerprint: audioFingerprint,
         readError: readError,
@@ -116,6 +123,7 @@ class Track {
         if (bitrateKbps != null) 'kbps': bitrateKbps,
         if (isVbr) 'vbr': true,
         if (sampleRate != null) 'hz': sampleRate,
+        if (channels != null) 'ch': channels,
         if (duration != null) 'ms': duration!.inMilliseconds,
         if (audioFingerprint != null) 'fp': audioFingerprint,
         if (readError != null) 'error': readError,
@@ -139,6 +147,7 @@ class Track {
       bitrateKbps: (j['kbps'] as num?)?.toInt(),
       isVbr: j['vbr'] == true,
       sampleRate: (j['hz'] as num?)?.toInt(),
+      channels: (j['ch'] as num?)?.toInt(),
       duration: ms is num ? Duration(milliseconds: ms.toInt()) : null,
       audioFingerprint: j['fp'] as String?,
       readError: j['error'] as String?,

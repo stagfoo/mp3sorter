@@ -299,23 +299,41 @@ void main() {
       }
     });
 
-    test('a low-bitrate file is planned a quality tag', () {
+    test('a low-bitrate file is NOT tagged', () {
+      // The behaviour this version removed. Quality is computed at scan
+      // time and shown; writing it would spend a real metadata field on
+      // something recomputable in milliseconds.
       final p = buildPlan(
         [t('/a.mp3', artist: 'A', title: 'B', bitrate: 64)],
         opts,
       );
-      final retag = p.retags.single;
-      expect(retag.genres, contains('low quality'));
-      expect(retag.reason, contains('low quality'));
+      expect(p.retags.where((r) => r.genres != null), isEmpty);
     });
 
-    test('a good file is not tagged, and a stale tag is cleared', () {
+    test('a marker written by an older version is taken back', () {
       final p = buildPlan([
         t('/a.mp3',
-            artist: 'A', title: 'B', bitrate: 320,
+            artist: 'A', title: 'B', bitrate: 64,
             genres: ['Rock', 'low quality']),
       ], opts);
       expect(p.retags.single.genres, ['Rock']);
+      expect(p.retags.single.reason, contains('remove'));
+    });
+
+    test('a file carrying no marker gets no genre change', () {
+      final p = buildPlan([
+        t('/music/A/B.mp3',
+            artist: 'A', title: 'B', bitrate: 64, genres: ['Rock']),
+      ], const PlanOptions(root: '/music'));
+      expect(p.retags.where((r) => r.genres != null), isEmpty);
+    });
+
+    test('the cleanup can be turned off', () {
+      final p = buildPlan([
+        t('/a.mp3',
+            artist: 'A', title: 'B', genres: ['Rock', 'low quality']),
+      ], const PlanOptions(root: '/music', cleanQualityTags: false));
+      expect(p.retags.where((r) => r.genres != null), isEmpty);
     });
 
     test('nothing is planned when nothing needs doing', () {

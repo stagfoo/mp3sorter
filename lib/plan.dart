@@ -101,7 +101,7 @@ class PlanOptions {
     this.root = '',
     this.renameFiles = true,
     this.writeTags = true,
-    this.tagQuality = true,
+    this.cleanQualityTags = true,
     this.standardiseArtists = true,
     this.removeDuplicates = false,
     this.trashDirName = '.mp3sorter-trash',
@@ -112,7 +112,10 @@ class PlanOptions {
 
   final bool renameFiles;
   final bool writeTags;
-  final bool tagQuality;
+  /// Remove any `low quality` genre an earlier version of this app
+  /// wrote. Nothing adds one any more — quality is computed at scan time
+  /// and never persisted — so this only ever takes something back.
+  final bool cleanQualityTags;
   final bool standardiseArtists;
 
   /// Off by default. Deleting is the one action that cannot be undone by
@@ -202,9 +205,10 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
       if (artist != null && artist != track.artist) newArtist = artist;
       if (title != null && title != track.title) newTitle = title;
 
-      if (options.tagQuality && track.band != null) {
-        final wanted = applyQualityTag(track.genres, track.band!);
-        if (!_sameList(wanted, track.genres)) newGenres = wanted;
+      // Quality is no longer written anywhere. The only genre change
+      // this app makes is removing a marker it should not have written.
+      if (options.cleanQualityTags && hasQualityTag(track.genres)) {
+        newGenres = stripQualityTags(track.genres);
       }
 
       if (newArtist != null || newTitle != null || newGenres != null) {
@@ -308,25 +312,9 @@ String _retagReason(
   if (artist != null) bits.add('artist → $artist');
   if (title != null) bits.add('title → $title');
   if (genres != null) {
-    final had = track.genres.contains(kLowQualityTag);
-    final will = genres.contains(kLowQualityTag);
-    if (will && !had) {
-      bits.add('mark ${track.bitrateKbps}k as $kLowQualityTag');
-    } else if (had && !will) {
-      bits.add('clear $kLowQualityTag');
-    } else {
-      bits.add('genres');
-    }
+    bits.add('remove the "$kLowQualityTag" genre this app added');
   }
   return bits.join(', ');
-}
-
-bool _sameList(List<String> a, List<String> b) {
-  if (a.length != b.length) return false;
-  for (var i = 0; i < a.length; i++) {
-    if (a[i] != b[i]) return false;
-  }
-  return true;
 }
 
 /// Problems worth refusing to apply over.

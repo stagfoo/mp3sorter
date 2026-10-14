@@ -145,7 +145,7 @@ class AppState extends ChangeNotifier {
         root: '$root/${options.renameFiles ? "_sorted" : ""}',
         renameFiles: options.renameFiles,
         writeTags: options.writeTags,
-        tagQuality: options.tagQuality,
+        cleanQualityTags: options.cleanQualityTags,
         standardiseArtists: options.standardiseArtists,
         removeDuplicates: options.removeDuplicates,
       ),
@@ -365,4 +365,20 @@ class AppState extends ChangeNotifier {
   }
 
   DuplicateSummary get duplicateSummary => summariseDuplicates(duplicates);
+
+  /// Files in one quality band, worst first, for the browse screen.
+  ///
+  /// Computed on demand rather than stored: it is a sort of a list
+  /// already in memory, and the whole point of this change is that
+  /// quality is derived, not kept.
+  List<Track> tracksInBand(QualityBand band) {
+    final out = [
+      for (final t in scan?.tracks ?? const <Track>[])
+        if (t.band == band) t,
+    ]..sort((a, b) {
+        final byRate = (a.bitrateKbps ?? 0).compareTo(b.bitrateKbps ?? 0);
+        return byRate != 0 ? byRate : a.path.compareTo(b.path);
+      });
+    return out;
+  }
 }

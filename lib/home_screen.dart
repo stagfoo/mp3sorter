@@ -18,6 +18,7 @@ import 'bitrate.dart';
 import 'duplicates.dart';
 import 'plan.dart';
 import 'recent_folders.dart';
+import 'quality_screen.dart';
 import 'review_screen.dart';
 import 'session_file.dart';
 
@@ -514,8 +515,15 @@ class _QualityCard extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             for (final band in QualityBand.values)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 3),
+              InkWell(
+                onTap: (counts[band] ?? 0) == 0
+                    ? null
+                    : () => Navigator.of(context).push(MaterialPageRoute(
+                          builder: (_) =>
+                              QualityBrowseScreen(app: app, band: band),
+                        )),
+                child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
                 child: Row(
                   children: [
                     Container(
@@ -545,9 +553,17 @@ class _QualityCard extends StatelessWidget {
                       child: Text('${counts[band] ?? 0}',
                           textAlign: TextAlign.right),
                     ),
+                    const Icon(Icons.chevron_right, size: 16),
                   ],
                 ),
               ),
+              ),
+            const SizedBox(height: 6),
+            Text(
+              'Computed from the file each scan, never written to it — '
+              'your genres stay yours.',
+              style: theme.textTheme.bodySmall,
+            ),
           ],
         ),
       ),
@@ -624,7 +640,7 @@ class _OptionsCard extends StatelessWidget {
             onChanged: (v) => app.setOptions(PlanOptions(
                 renameFiles: v,
                 writeTags: o.writeTags,
-                tagQuality: o.tagQuality,
+                cleanQualityTags: o.cleanQualityTags,
                 standardiseArtists: o.standardiseArtists,
                 removeDuplicates: o.removeDuplicates)),
           ),
@@ -634,19 +650,20 @@ class _OptionsCard extends StatelessWidget {
             onChanged: (v) => app.setOptions(PlanOptions(
                 renameFiles: o.renameFiles,
                 writeTags: v,
-                tagQuality: o.tagQuality,
+                cleanQualityTags: o.cleanQualityTags,
                 standardiseArtists: o.standardiseArtists,
                 removeDuplicates: o.removeDuplicates)),
           ),
           SwitchListTile(
-            title: const Text('Mark low quality'),
-            subtitle: Text('Adds a "$kLowQualityTag" genre below '
-                '${kLowQualityKbps}k'),
-            value: o.tagQuality,
+            title: const Text('Remove old quality tags'),
+            subtitle: Text('Takes back the "$kLowQualityTag" genre that '
+                'versions before 1.0.4 wrote. Quality is computed now, '
+                'never stored.'),
+            value: o.cleanQualityTags,
             onChanged: (v) => app.setOptions(PlanOptions(
                 renameFiles: o.renameFiles,
                 writeTags: o.writeTags,
-                tagQuality: v,
+                cleanQualityTags: v,
                 standardiseArtists: o.standardiseArtists,
                 removeDuplicates: o.removeDuplicates)),
           ),
@@ -658,7 +675,7 @@ class _OptionsCard extends StatelessWidget {
             onChanged: (v) => app.setOptions(PlanOptions(
                 renameFiles: o.renameFiles,
                 writeTags: o.writeTags,
-                tagQuality: o.tagQuality,
+                cleanQualityTags: o.cleanQualityTags,
                 standardiseArtists: v,
                 removeDuplicates: o.removeDuplicates)),
           ),
@@ -669,7 +686,7 @@ class _OptionsCard extends StatelessWidget {
             onChanged: (v) => app.setOptions(PlanOptions(
                 renameFiles: o.renameFiles,
                 writeTags: o.writeTags,
-                tagQuality: o.tagQuality,
+                cleanQualityTags: o.cleanQualityTags,
                 standardiseArtists: o.standardiseArtists,
                 removeDuplicates: v)),
           ),

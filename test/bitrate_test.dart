@@ -294,43 +294,43 @@ void main() {
     });
   });
 
-  group('the quality tag', () {
-    test('a low file gains the marker', () {
-      expect(applyQualityTag([], QualityBand.low), [kLowQualityTag]);
+  group('the quality tag is only ever removed', () {
+    // Earlier versions wrote "low quality" into the genre field. That was
+    // wrong: bitrate is derived from the file in milliseconds, so storing
+    // it spent a real metadata field to save a free computation — and it
+    // overwrote genres the owner had set. Nothing adds one now; these
+    // tests pin the taking-back.
+
+    test('a marker this app wrote is recognised', () {
+      expect(hasQualityTag([kLowQualityTag]), isTrue);
+      expect(hasQualityTag(['Rock']), isFalse);
+      expect(hasQualityTag([]), isFalse);
     });
 
-    test('a good file does not', () {
-      expect(applyQualityTag([], QualityBand.high), isEmpty);
+    test('it is matched case- and space-insensitively', () {
+      expect(hasQualityTag(['  Low Quality ']), isTrue);
+      expect(hasQualityTag(['LOW QUALITY']), isTrue);
     });
 
-    test('existing genres are kept, in order', () {
-      expect(
-        applyQualityTag(['Shoegaze', 'Dream Pop'], QualityBand.low),
-        ['Shoegaze', 'Dream Pop', kLowQualityTag],
-      );
+    test('stripping removes the marker and nothing else', () {
+      expect(stripQualityTags(['Rock', kLowQualityTag, 'Shoegaze']),
+          ['Rock', 'Shoegaze']);
     });
 
-    test('re-running does not accumulate copies', () {
-      // The bug this prevents: scan three times, get three markers.
-      var g = applyQualityTag(['Rock'], QualityBand.low);
-      g = applyQualityTag(g, QualityBand.low);
-      g = applyQualityTag(g, QualityBand.low);
-      expect(g.where((x) => x == kLowQualityTag), hasLength(1));
+    test('the owner\'s own genres keep their order', () {
+      // Reordering would show up as a spurious change on every file.
+      expect(stripQualityTags(['Zydeco', 'Ambient', 'Black Metal']),
+          ['Zydeco', 'Ambient', 'Black Metal']);
     });
 
-    test('a stale marker is removed once the file is replaced', () {
-      // You re-rip at 320; the old marker must go.
-      expect(
-        applyQualityTag(['Rock', kLowQualityTag], QualityBand.high),
-        ['Rock'],
-      );
+    test('a list with no marker is returned unchanged', () {
+      expect(stripQualityTags(['Rock']), ['Rock']);
+      expect(stripQualityTags([]), isEmpty);
     });
 
-    test('the marker is matched case- and space-insensitively', () {
-      expect(
-        applyQualityTag(['  Low Quality '], QualityBand.high),
-        isEmpty,
-      );
+    test('stripping twice is the same as stripping once', () {
+      final once = stripQualityTags(['Rock', kLowQualityTag]);
+      expect(stripQualityTags(once), once);
     });
   });
 }

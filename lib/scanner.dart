@@ -172,6 +172,7 @@ Future<Track> readTrack(File file) async {
     bitrateKbps: info?.bitrateKbps,
     isVbr: info?.isVbr ?? false,
     sampleRate: info?.sampleRate,
+    channels: info?.channels,
     duration: info?.duration,
     audioFingerprint: fingerprint,
     readError: error,

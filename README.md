@@ -16,7 +16,7 @@ Runs on Android and on Linux desktop from one codebase.
 | | |
 | --- | --- |
 | **Scan** | Reads tags and frame headers. Read-only, always. |
-| **Quality** | Real bitrate from the MPEG frames, banded, with a `low quality` genre tag below 128k. |
+| **Quality** | Real bitrate from the MPEG frames, banded and browsable. Computed every scan, never written to the file. |
 | **Artists** | Levenshtein clustering finds `ColdPlay` / `Coldplay` and standardises them. |
 | **Duplicates** | Three kinds — identical bytes, same audio different tags, same song different encodings. |
 | **Plan** | Every proposed change listed and individually rejectable. |
@@ -66,6 +66,28 @@ Two things that took getting right:
 
 A Xing/Info/VBRI header is used when present, since it describes the
 whole file exactly and no amount of sampling can.
+
+### Quality is computed, not stored
+
+Versions up to 1.0.3 wrote a `low quality` genre into files below 128k.
+That was wrong, and 1.0.4 removes it.
+
+Bitrate is derived from the file in about two milliseconds. Writing it
+into a tag spent a **real metadata field** — one the owner may have set
+themselves — to save a computation that is free, and left 1,500 files
+carrying a genre no music player should be showing. Derived data belongs
+in the view, not in the thing it was derived from.
+
+So quality is now computed at every scan, shown banded on the home
+screen, and **tappable**: each band opens the list of files in it, worst
+first, with the bitrate, sample rate, channel count and size that produced
+the verdict. The point of knowing a file is poor is to go and re-source
+it, and for that you want a list you can read — not a marker buried in
+metadata.
+
+The one genre change the app still makes is **taking that marker back**
+from files an earlier version wrote it to. It is on by default and only
+ever removes.
 
 ## Levenshtein, and why normalisation is most of it
 
@@ -279,6 +301,8 @@ version tag, one APK asset, version and build number bumped every time.
 - **Guess an artist.** A file called `1739349830600.mp3` is reported, not
   invented into `Unknown Artist/`.
 - **Delete anything.** Duplicates go to a trash folder you empty yourself.
+- **Write derived data into your files.** Quality is recomputed each scan.
+  The only tag writes are artist and title, which are real metadata.
 - **Handle FLAC, M4A or OGG.** The frame parser is MP3-specific. The tag
   library covers more, but the quality analysis — the point of the thing —
   does not.
