@@ -108,6 +108,18 @@ Which copy to keep: best bitrate first (the only difference that cannot
 be fixed later), then longest (catching a truncated download), then
 tagged over untagged, then the one already filed somewhere sensible.
 
+## Recent folders
+
+Scanned folders are remembered and offered on the home screen, with the
+file count last seen and enough of the parent path to tell two folders
+called `Music` apart.
+
+**An entry whose folder is not currently mounted stays in the list**,
+greyed, rather than being pruned. A collection on a removable card lives
+at a path that simply does not exist while the card is out — dropping it
+then would empty the list at exactly the moment remembering was useful.
+Existence is checked when the row is drawn, never as a reason to forget.
+
 ## Saving and reloading a scan
 
 Scanning 3,000 files off an SD card takes **163 seconds on a phone**.

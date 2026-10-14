@@ -17,6 +17,7 @@ import 'app_state.dart';
 import 'bitrate.dart';
 import 'duplicates.dart';
 import 'plan.dart';
+import 'recent_folders.dart';
 import 'review_screen.dart';
 import 'session_file.dart';
 
@@ -99,6 +100,19 @@ class _HomeScreenState extends State<HomeScreen> {
     await app.scanFolder(path);
   }
 
+  Future<void> _scanPath(String path) async {
+    if (!Directory(path).existsSync()) {
+      // Almost always a removable card that is not in. Saying which is
+      // the difference between plugging it back in and assuming the app
+      // has lost the folder.
+      _say('That folder is not there right now. If it is on an SD card, '
+          'check the card is mounted.');
+      return;
+    }
+    await _ensureStorageAccess();
+    await app.scanFolder(path);
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -171,6 +185,10 @@ class _HomeScreenState extends State<HomeScreen> {
                 _PlanCard(app: app),
                 const SizedBox(height: 32),
               ] else ...[
+                if (app.recentFolders.isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  _RecentFolders(app: app, onScan: _scanPath),
+                ],
                 const SizedBox(height: 40),
                 Center(
                   child: Padding(
@@ -248,6 +266,87 @@ class _HomeScreenState extends State<HomeScreen> {
 /// run moves files, every path in the scan points at where they used to
 /// be. Applying again fails on all of them with "file no longer exists",
 /// which is true and tells you nothing.
+/// Folders scanned before.
+///
+/// An entry whose folder is not currently mounted stays in the list and
+/// is shown greyed rather than removed — on a removable card the path
+/// disappears whenever the card is out, which is exactly when being able
+/// to see it still matters.
+class _RecentFolders extends StatelessWidget {
+  const _RecentFolders({required this.app, required this.onScan});
+
+  final AppState app;
+  final Future<void> Function(String) onScan;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+            child: Text('Recent folders',
+                style: theme.textTheme.titleMedium),
+          ),
+          for (final folder in app.recentFolders)
+            _RecentRow(folder: folder, app: app, onScan: onScan),
+          const SizedBox(height: 8),
+        ],
+      ),
+    );
+  }
+}
+
+class _RecentRow extends StatelessWidget {
+  const _RecentRow({
+    required this.folder,
+    required this.app,
+    required this.onScan,
+  });
+
+  final RecentFolder folder;
+  final AppState app;
+  final Future<void> Function(String) onScan;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    // Checked at render time, never used to prune the stored list.
+    final available = Directory(folder.path).existsSync();
+
+    return ListTile(
+      dense: true,
+      enabled: true,
+      leading: Icon(
+        available ? Icons.folder_outlined : Icons.sd_card_alert_outlined,
+        color: available ? null : theme.disabledColor,
+      ),
+      title: Text(
+        folder.name,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(color: available ? null : theme.disabledColor),
+      ),
+      subtitle: Text(
+        available
+            ? '${folder.parentLabel} · ${folder.fileCount} files'
+            : '${folder.parentLabel} · not mounted',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: theme.textTheme.bodySmall,
+      ),
+      trailing: IconButton(
+        icon: const Icon(Icons.close, size: 18),
+        tooltip: 'Forget this folder',
+        onPressed: () => app.forgetFolder(folder.path),
+      ),
+      onTap: () => onScan(folder.path),
+    );
+  }
+}
+
 class _StaleCard extends StatelessWidget {
   const _StaleCard({required this.app});
 

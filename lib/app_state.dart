@@ -14,6 +14,7 @@ import 'apply.dart';
 import 'bitrate.dart';
 import 'duplicates.dart';
 import 'plan.dart';
+import 'recent_folders.dart';
 import 'scanner.dart';
 import 'session_file.dart';
 import 'track.dart';
@@ -57,12 +58,28 @@ class AppState extends ChangeNotifier {
   /// Where the last saved scan went, for the message after saving.
   String? lastSavedPath;
 
+  /// Folders scanned before. Loaded once at startup so the first screen
+  /// can offer them without waiting on disk.
+  List<RecentFolder> recentFolders = const [];
+
   Journal? _journal;
 
   Future<Journal> _openJournal() async {
     if (_journal != null) return _journal!;
     final dir = await getApplicationDocumentsDirectory();
     return _journal = Journal(File('${dir.path}/mp3sorter-journal.jsonl'));
+  }
+
+  Future<void> loadRecents() async {
+    final store = await RecentFoldersStore.open();
+    recentFolders = await store.load();
+    notifyListeners();
+  }
+
+  Future<void> forgetFolder(String path) async {
+    final store = await RecentFoldersStore.open();
+    recentFolders = await store.remove(path);
+    notifyListeners();
   }
 
   Future<void> refreshUndoState() async {
@@ -96,6 +113,13 @@ class AppState extends ChangeNotifier {
     scan = result;
     scanIsStale = false;
     lastResult = null;
+
+    // Recorded after the scan rather than when the folder is picked, so
+    // the remembered file count is a real one and a cancelled or failed
+    // scan does not leave a misleading entry.
+    final store = await RecentFoldersStore.open();
+    recentFolders = await store.add(path, result.tracks.length);
+
     duplicates = findDuplicates(result.tracks);
     _rebuildPlan();
     stage = Stage.scanned;

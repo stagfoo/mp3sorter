@@ -22,6 +22,7 @@ class _Mp3SorterAppState extends State<Mp3SorterApp> {
   void initState() {
     super.initState();
     _app.refreshUndoState();
+    _app.loadRecents();
   }
 
   @override
