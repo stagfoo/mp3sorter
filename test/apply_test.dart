@@ -111,7 +111,11 @@ void main() {
         journalIn(),
       );
       expect(r.failed, 1);
-      expect(r.errors.single, contains('no longer exists'));
+      // The message has to say the plan is stale, not just that a file is
+      // missing: on a device this produced 249 identical "file no longer
+      // exists" lines after a run that had already moved everything, and
+      // nothing on screen explained that.
+      expect(r.errors.single, contains('out of date'));
     });
 
     test('one failure does not abandon the rest of the run', () async {

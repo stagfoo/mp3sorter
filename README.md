@@ -108,6 +108,27 @@ Which copy to keep: best bitrate first (the only difference that cannot
 be fixed later), then longest (catching a truncated download), then
 tagged over untagged, then the one already filed somewhere sensible.
 
+## Saving and reloading a scan
+
+Scanning 3,000 files off an SD card takes **163 seconds on a phone**.
+Without a way to save that, every change of mind about a setting costs
+another three minutes, so in practice settings do not get changed and the
+plan does not get examined properly.
+
+- **Save scan** writes a `.json` beside the collection that loads back
+  exactly as scanned.
+- **Save report** writes a `.txt` — every proposed move, duplicate group
+  and artist merge in full. A 5,000-row list is not reviewable on a
+  phone, and pretending otherwise is how a plan gets approved unread.
+
+Both are written next to the music rather than through a save dialog: the
+folder is already known to be writable, and a file beside the collection
+is easier to find again than one in a picker's idea of "Documents".
+
+A loaded scan describes the collection *as it was*, so it is marked
+out-of-date until **Check files** has confirmed the paths are still
+there — one stat per file, far cheaper than a rescan.
+
 ## Safety
 
 - **Plan, review, apply.** Actions start accepted — the review is for
@@ -144,6 +165,29 @@ plugin imports, so it tests with no device attached.
 
 **132 tests.** `tool/verify_bitrate.dart` and `tool/dry_run.dart` are not
 tests — they run against a real collection and need `ffprobe`.
+
+## A bug this app shipped with, and how it looked
+
+On a real device the first run worked, and then the screen said **0
+applied, 249 failed**, every line reading *"file no longer exists"*.
+
+Nothing was missing. The first run had already moved those files, and the
+plan still on screen was built from the scan taken *before* it — so every
+path in it pointed at where the file used to be. The app let that stale
+plan be applied again, and then reported the consequence in the least
+helpful words available.
+
+Three things were wrong, and all three are fixed:
+
+- **The plan survived the run that invalidated it.** A scan is now marked
+  out-of-date as soon as anything moves, and the Apply button is disabled
+  until it is rechecked or redone.
+- **Nothing on screen said so.** There is now a banner on both the home
+  and review screens explaining that files have moved and offering the
+  one-tap recheck.
+- **The error blamed the collection.** It now says the plan is out of
+  date rather than that a file has vanished, which is what was actually
+  true.
 
 ## Two upstream bugs worked around
 

@@ -99,6 +99,52 @@ class Track {
         readError: readError,
       );
 
+  /// For saving a scan to disk.
+  ///
+  /// Scanning 3,000 files off an SD card takes nearly three minutes, so
+  /// being able to reload one is the difference between trying a
+  /// different setting and not bothering.
+  Map<String, Object?> toJson() => {
+        'path': path,
+        'size': sizeBytes,
+        if (artist != null) 'artist': artist,
+        if (title != null) 'title': title,
+        if (album != null) 'album': album,
+        if (year != null) 'year': year,
+        if (trackNumber != null) 'track': trackNumber,
+        if (genres.isNotEmpty) 'genres': genres,
+        if (bitrateKbps != null) 'kbps': bitrateKbps,
+        if (isVbr) 'vbr': true,
+        if (sampleRate != null) 'hz': sampleRate,
+        if (duration != null) 'ms': duration!.inMilliseconds,
+        if (audioFingerprint != null) 'fp': audioFingerprint,
+        if (readError != null) 'error': readError,
+      };
+
+  static Track? fromJson(Map<String, Object?> j) {
+    final path = j['path'];
+    // A row without a path describes nothing. Skipped rather than fatal,
+    // so one bad line in a saved scan costs that line.
+    if (path is! String || path.isEmpty) return null;
+    final ms = j['ms'];
+    return Track(
+      path: path,
+      sizeBytes: (j['size'] as num?)?.toInt() ?? 0,
+      artist: j['artist'] as String?,
+      title: j['title'] as String?,
+      album: j['album'] as String?,
+      year: (j['year'] as num?)?.toInt(),
+      trackNumber: (j['track'] as num?)?.toInt(),
+      genres: (j['genres'] as List?)?.cast<String>() ?? const [],
+      bitrateKbps: (j['kbps'] as num?)?.toInt(),
+      isVbr: j['vbr'] == true,
+      sampleRate: (j['hz'] as num?)?.toInt(),
+      duration: ms is num ? Duration(milliseconds: ms.toInt()) : null,
+      audioFingerprint: j['fp'] as String?,
+      readError: j['error'] as String?,
+    );
+  }
+
   @override
   String toString() => 'Track($path, $artist - $title, ${bitrateKbps}k)';
 }

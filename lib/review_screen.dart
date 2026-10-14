@@ -68,6 +68,7 @@ class _ReviewScreenState extends State<ReviewScreen> {
         ),
         body: Column(
           children: [
+            if (app.scanIsStale) const _StaleBar(),
             if (problems.isNotEmpty) _Problems(problems: problems),
             if (plan.artistMerges.isNotEmpty) _Merges(app: app),
             Expanded(
@@ -83,7 +84,7 @@ class _ReviewScreenState extends State<ReviewScreen> {
             ),
             _ApplyBar(
               app: app,
-              blocked: problems.isNotEmpty,
+              blocked: problems.isNotEmpty || app.scanIsStale,
               onApply: () => _confirm(context, approved),
             ),
           ],
@@ -126,6 +127,32 @@ class _ReviewScreenState extends State<ReviewScreen> {
     if (yes != true || !context.mounted) return;
     Navigator.of(context).pop();
     await app.applyApproved();
+  }
+}
+
+/// The guard that stops a stale plan being applied.
+///
+/// Without it, re-applying after a run that moved files fails on every
+/// action with "file no longer exists" — which is what happened on a
+/// real device: 0 applied, 249 failed, and nothing on screen explaining
+/// that the first run had already done the work.
+class _StaleBar extends StatelessWidget {
+  const _StaleBar();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      width: double.infinity,
+      color: theme.colorScheme.tertiaryContainer,
+      padding: const EdgeInsets.all(12),
+      child: Text(
+        'Files have moved since this scan was taken, so these paths are '
+        'out of date. Go back and either check the files or rescan — '
+        'applying now would fail on every one of them.',
+        style: TextStyle(color: theme.colorScheme.onTertiaryContainer),
+      ),
+    );
   }
 }
 

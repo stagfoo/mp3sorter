@@ -200,14 +200,20 @@ Future<JournalEntry> _applyOne(PlannedAction action) async {
   final source = File(action.path);
 
   if (!source.existsSync()) {
+    // Distinguishing why matters more than it looks. The commonest cause
+    // by far is that an earlier run already moved the file — in which
+    // case the plan is simply stale, and reporting it as a missing file
+    // sends you looking for a problem with the collection instead.
+    final parentExists = source.parent.existsSync();
     return JournalEntry(
       kind: action.kind,
       path: action.path,
       targetPath: action.targetPath,
       at: now,
-      // Not a crash: the collection can change between the scan and the
-      // apply, and a file that has already gone is a fact to record.
-      error: 'file no longer exists',
+      error: parentExists
+          ? 'not here any more — most likely already moved by an '
+              'earlier run, so this plan is out of date'
+          : 'the folder it was in is gone, so this plan is out of date',
     );
   }
 

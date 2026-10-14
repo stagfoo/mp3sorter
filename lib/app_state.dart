@@ -15,6 +15,7 @@ import 'bitrate.dart';
 import 'duplicates.dart';
 import 'plan.dart';
 import 'scanner.dart';
+import 'session_file.dart';
 import 'track.dart';
 
 enum Stage { idle, scanning, scanned, applying, done }
@@ -41,6 +42,20 @@ class AppState extends ChangeNotifier {
 
   ApplyResult? lastResult;
   bool canUndo = false;
+
+  /// Set once a run has moved files about, which makes every path in the
+  /// current scan a guess. Until a rescan, the plan cannot be applied
+  /// again.
+  ///
+  /// The bug this fixes, seen on a real device: after a successful run
+  /// the plan stayed on screen and could be pressed again, at which point
+  /// every action failed with "file no longer exists" — literally true,
+  /// since the first run had moved them, and completely unhelpful as an
+  /// explanation. 249 failures that were entirely the app's fault.
+  bool scanIsStale = false;
+
+  /// Where the last saved scan went, for the message after saving.
+  String? lastSavedPath;
 
   Journal? _journal;
 
@@ -79,6 +94,8 @@ class AppState extends ChangeNotifier {
     );
 
     scan = result;
+    scanIsStale = false;
+    lastResult = null;
     duplicates = findDuplicates(result.tracks);
     _rebuildPlan();
     stage = Stage.scanned;
@@ -176,6 +193,12 @@ class AppState extends ChangeNotifier {
       },
     );
 
+    // Anything that moved a file invalidates every path in the scan.
+    if ((lastResult?.succeeded ?? 0) > 0 &&
+        (toRun.moves.isNotEmpty || toRun.trashes.isNotEmpty)) {
+      scanIsStale = true;
+    }
+
     stage = Stage.done;
     await refreshUndoState();
     notifyListeners();
@@ -197,9 +220,113 @@ class AppState extends ChangeNotifier {
       },
     );
 
+    // Undo moves files back, so the scan is stale either way.
+    scanIsStale = true;
     stage = Stage.done;
     await refreshUndoState();
     notifyListeners();
+  }
+
+  // ---------------------------------------------------- save and reload
+
+  /// Writes the scan to a file that can be loaded back.
+  Future<String?> saveSession(String path) async {
+    final s = scan;
+    final root = rootPath;
+    if (s == null || root == null) return null;
+    final file = File(path);
+    await file.parent.create(recursive: true);
+    await file.writeAsString(encodeSession(Session(
+      rootPath: root,
+      tracks: s.tracks,
+      scannedAt: DateTime.now(),
+      scanSeconds: s.elapsed.inSeconds,
+    )));
+    lastSavedPath = path;
+    notifyListeners();
+    return path;
+  }
+
+  /// Writes the readable report.
+  Future<String?> saveReport(String path) async {
+    final s = scan;
+    final p = plan;
+    final root = rootPath;
+    if (s == null || p == null || root == null) return null;
+    final file = File(path);
+    await file.parent.create(recursive: true);
+    await file.writeAsString(writeReport(
+      rootPath: root,
+      scan: s,
+      duplicates: duplicates,
+      plan: p,
+    ));
+    lastSavedPath = path;
+    notifyListeners();
+    return path;
+  }
+
+  /// Loads a scan saved earlier, skipping the three-minute reread.
+  ///
+  /// The loaded paths describe the collection as it was when saved, so
+  /// the scan is treated as unverified: a "check files still exist" pass
+  /// is offered before anything can be applied.
+  Future<String> loadSession(String path) async {
+    final result = decodeSession(await File(path).readAsString());
+    rootPath = result.session.rootPath;
+    scan = ScanResult(
+      tracks: result.session.tracks,
+      skipped: const [],
+      elapsed: Duration(seconds: result.session.scanSeconds),
+    );
+    duplicates = findDuplicates(result.session.tracks);
+    _rebuildPlan();
+    lastResult = null;
+    // Loaded from disk, so the files may have moved since. Verifying is
+    // one tap and far cheaper than a full rescan.
+    scanIsStale = true;
+    stage = Stage.scanned;
+    notifyListeners();
+
+    final bits = <String>['Loaded ${result.session.tracks.length} files'];
+    if (result.skipped > 0) bits.add('${result.skipped} rows unreadable');
+    if (result.fromNewerBuild) bits.add('saved by a newer build');
+    return bits.join(' · ');
+  }
+
+  /// Checks the scanned paths are still where they were.
+  ///
+  /// Far cheaper than a rescan — one stat per file rather than reading
+  /// headers — and it is what clears the stale flag after a load or a
+  /// run, so the next apply cannot fail en masse on paths that moved.
+  Future<int> verifyPaths() async {
+    final s = scan;
+    if (s == null) return 0;
+    stage = Stage.scanning;
+    progressLabel = 'checking files are still there';
+    progressDone = 0;
+    notifyListeners();
+
+    final alive = <Track>[];
+    var missing = 0;
+    for (final t in s.tracks) {
+      if (File(t.path).existsSync()) {
+        alive.add(t);
+      } else {
+        missing++;
+      }
+      progressDone++;
+      if (progressDone % 200 == 0) notifyListeners();
+    }
+
+    scan = ScanResult(
+        tracks: alive, skipped: s.skipped, elapsed: s.elapsed);
+    duplicates = findDuplicates(alive);
+    _rebuildPlan();
+    scanIsStale = false;
+    stage = Stage.scanned;
+    notifyListeners();
+    return missing;
   }
 
   // --------------------------------------------------------- reporting

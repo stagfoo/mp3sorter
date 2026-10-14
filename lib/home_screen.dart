@@ -18,6 +18,7 @@ import 'bitrate.dart';
 import 'duplicates.dart';
 import 'plan.dart';
 import 'review_screen.dart';
+import 'session_file.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key, required this.app});
@@ -131,6 +132,7 @@ class _HomeScreenState extends State<HomeScreen> {
             padding: const EdgeInsets.all(16),
             children: [
               if (app.lastResult != null) _ResultCard(app: app),
+              if (app.scanIsStale && app.scan != null) _StaleCard(app: app),
               Card(
                 child: ListTile(
                   leading: const Icon(Icons.folder_open),
@@ -139,13 +141,26 @@ class _HomeScreenState extends State<HomeScreen> {
                       ? 'Nothing is read until you pick one'
                       : '${scan?.tracks.length ?? 0} files · '
                           'scanned in ${scan?.elapsed.inSeconds ?? 0}s'),
-                  trailing: FilledButton(
-                    onPressed: _pickFolder,
-                    child: Text(app.rootPath == null ? 'Choose' : 'Rescan'),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (app.scan == null)
+                        TextButton(
+                          onPressed: _loadSession,
+                          child: const Text('Load'),
+                        ),
+                      FilledButton(
+                        onPressed: _pickFolder,
+                        child:
+                            Text(app.rootPath == null ? 'Choose' : 'Rescan'),
+                      ),
+                    ],
                   ),
                 ),
               ),
               if (scan != null) ...[
+                const SizedBox(height: 12),
+                _SaveLoadRow(app: app, onMessage: _say),
                 const SizedBox(height: 16),
                 _QualityCard(app: app),
                 const SizedBox(height: 12),
@@ -176,6 +191,33 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  void _say(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _loadSession() async {
+    final picked = await FilePicker.pickFiles(
+      dialogTitle: 'Load a saved scan',
+      type: FileType.any,
+    );
+    if (picked.isEmpty) return;
+    final path = picked.first.path;
+    if (path == null) {
+      _say('That file cannot be read directly. Copy it to local storage '
+          'first.');
+      return;
+    }
+    try {
+      _say(await app.loadSession(path));
+    } on SessionFormatException catch (e) {
+      _say('Not a saved scan: ${e.message}');
+    } catch (e) {
+      _say('Could not load that: $e');
+    }
+  }
+
   Future<void> _confirmUndo() async {
     final yes = await showDialog<bool>(
       context: context,
@@ -197,6 +239,124 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
     if (yes == true) await app.undoEverything();
+  }
+}
+
+/// Shown when the scan no longer describes what is on disk.
+///
+/// The screen that would have prevented 249 identical failures: after a
+/// run moves files, every path in the scan points at where they used to
+/// be. Applying again fails on all of them with "file no longer exists",
+/// which is true and tells you nothing.
+class _StaleCard extends StatelessWidget {
+  const _StaleCard({required this.app});
+
+  final AppState app;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      color: theme.colorScheme.tertiaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.history_toggle_off, size: 20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text('This scan is out of date',
+                      style: theme.textTheme.titleSmall),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Files have moved since it was taken, so the plan points at '
+              'paths that no longer exist. Check what is still there, or '
+              'scan again from scratch.',
+              style: theme.textTheme.bodySmall,
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                FilledButton.tonal(
+                  onPressed: () async {
+                    final missing = await app.verifyPaths();
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text(missing == 0
+                          ? 'All files are where the scan says.'
+                          : '$missing files had moved and were dropped '
+                              'from the plan.'),
+                    ));
+                  },
+                  child: const Text('Check files'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SaveLoadRow extends StatelessWidget {
+  const _SaveLoadRow({required this.app, required this.onMessage});
+
+  final AppState app;
+  final void Function(String) onMessage;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: OutlinedButton.icon(
+            icon: const Icon(Icons.save_alt, size: 18),
+            label: const Text('Save scan'),
+            onPressed: () => _save(context, json: true),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: OutlinedButton.icon(
+            icon: const Icon(Icons.description_outlined, size: 18),
+            label: const Text('Save report'),
+            onPressed: () => _save(context, json: false),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _save(BuildContext context, {required bool json}) async {
+    // Written beside the collection rather than through a save dialog:
+    // the folder is already known to be writable, and a file next to the
+    // music is easier to find again than one in a picker's idea of
+    // "Documents".
+    final stamp = DateTime.now()
+        .toIso8601String()
+        .substring(0, 16)
+        .replaceAll(':', '')
+        .replaceAll('-', '');
+    final name = json
+        ? 'mp3sorter-scan-$stamp.json'
+        : 'mp3sorter-report-$stamp.txt';
+    final path = '${app.rootPath}/$name';
+    try {
+      final written =
+          json ? await app.saveSession(path) : await app.saveReport(path);
+      onMessage(written == null ? 'Nothing to save' : 'Saved $name');
+    } catch (e) {
+      // The commonest cause by far on Android: a removable SD card, which
+      // all-files access does not cover for writing.
+      onMessage('Could not write there: $e');
+    }
   }
 }
 
