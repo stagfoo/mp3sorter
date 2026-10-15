@@ -9,7 +9,9 @@ library;
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:audio_metadata_reader/audio_metadata_reader.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mp3sorter/apply.dart';
 import 'package:mp3sorter/plan.dart';
@@ -30,14 +32,48 @@ Journal journalIn() => Journal(File(p('.journal.jsonl')));
 Plan planOf({
   List<PlannedAction> moves = const [],
   List<PlannedAction> trashes = const [],
+  List<PlannedAction> art = const [],
 }) =>
     Plan(
       moves: moves,
       retags: const [],
       trashes: trashes,
+      art: art,
       artistMerges: const {},
       unsortable: const [],
     );
+
+/// Bytes that sniff as a JPEG. The contents do not matter — nothing in
+/// this app decodes an image, it only moves one around.
+Uint8List jpegBytes([int fill = 0x11]) =>
+    Uint8List.fromList([0xFF, 0xD8, 0xFF, ...List.filled(300, fill)]);
+
+File writeImage(String relative, [int fill = 0x11]) {
+  final f = File(p(relative));
+  f.parent.createSync(recursive: true);
+  f.writeAsBytesSync(jpegBytes(fill));
+  return f;
+}
+
+/// A one-second silent MP3 that carries an ID3v2 tag, so art can be
+/// written into it.
+///
+/// Committed rather than generated: ffmpeg is on this machine and is not
+/// on a CI runner, and a test that quietly skips on CI is not a test.
+File copyFixture(String relative) {
+  final f = File(p(relative));
+  f.parent.createSync(recursive: true);
+  f.writeAsBytesSync(File('test/fixtures/silence.mp3').readAsBytesSync());
+  return f;
+}
+
+int picturesIn(String path) {
+  try {
+    return readMetadata(File(path), getImage: true).pictures.length;
+  } catch (_) {
+    return -1;
+  }
+}
 
 void main() {
   setUp(() => tmp = Directory.systemTemp.createTempSync('mp3sorter_test'));
@@ -431,5 +467,256 @@ void _failedMoveLeavesNothing() {
       expect(r.failed, 0);
       expect(File(p('locked3/song.mp3')).existsSync(), isTrue);
     }, skip: Platform.isWindows);
+  });
+
+  group('cover art', () {
+    test('a cover file is created beside the album', () async {
+      writeImage('album/donor.jpg');
+      final j = journalIn();
+      final r = await applyPlan(
+        planOf(art: [
+          PlannedAction(
+            kind: ActionKind.writeCover,
+            path: p('album/cover.jpg'),
+            artFrom: p('album/donor.jpg'),
+          ),
+        ]),
+        j,
+      );
+
+      expect(r.succeeded, 1);
+      expect(File(p('album/cover.jpg')).readAsBytesSync(), jpegBytes());
+    });
+
+    test('undo removes a cover this app created', () async {
+      writeImage('album/donor.jpg');
+      final j = journalIn();
+      await applyPlan(
+        planOf(art: [
+          PlannedAction(
+            kind: ActionKind.writeCover,
+            path: p('album/cover.jpg'),
+            artFrom: p('album/donor.jpg'),
+          ),
+        ]),
+        j,
+      );
+      expect(File(p('album/cover.jpg')).existsSync(), isTrue);
+
+      final u = await undo(j);
+      expect(u.failed, 0);
+      expect(File(p('album/cover.jpg')).existsSync(), isFalse);
+      expect(File(p('album/donor.jpg')).existsSync(), isTrue,
+          reason: 'the source was never this run\'s to remove');
+    });
+
+    test('an existing cover is left exactly as it was', () async {
+      // Somebody put that there, possibly a better one than this.
+      writeImage('album/donor.jpg', 0x11);
+      writeImage('album/cover.jpg', 0x99);
+      final j = journalIn();
+      final r = await applyPlan(
+        planOf(art: [
+          PlannedAction(
+            kind: ActionKind.writeCover,
+            path: p('album/cover.jpg'),
+            artFrom: p('album/donor.jpg'),
+          ),
+        ]),
+        j,
+      );
+
+      expect(r.failed, 1);
+      expect(r.errors.single, contains('already there'));
+      expect(File(p('album/cover.jpg')).readAsBytesSync(), jpegBytes(0x99));
+    });
+
+    test('a source that is not an image writes nothing', () async {
+      write('album/notes.txt', 'this is not a jpeg');
+      final j = journalIn();
+      final r = await applyPlan(
+        planOf(art: [
+          PlannedAction(
+            kind: ActionKind.writeCover,
+            path: p('album/cover.jpg'),
+            artFrom: p('album/notes.txt'),
+          ),
+        ]),
+        j,
+      );
+
+      expect(r.failed, 1);
+      expect(File(p('album/cover.jpg')).existsSync(), isFalse);
+    });
+
+    test('a missing source is a reported failure, not a crash', () async {
+      final j = journalIn();
+      final r = await applyPlan(
+        planOf(art: [
+          PlannedAction(
+            kind: ActionKind.writeCover,
+            path: p('album/cover.jpg'),
+            artFrom: p('album/gone.jpg'),
+          ),
+        ]),
+        j,
+      );
+      expect(r.failed, 1);
+      expect(r.errors.single, contains('could not read a cover'));
+    });
+
+    test('art is embedded into a file and undo takes it back out', () async {
+      copyFixture('album/01.mp3');
+      writeImage('album/donor.jpg');
+      expect(picturesIn(p('album/01.mp3')), 0);
+
+      final j = journalIn();
+      final r = await applyPlan(
+        planOf(art: [
+          PlannedAction(
+            kind: ActionKind.embedArt,
+            path: p('album/01.mp3'),
+            artFrom: p('album/donor.jpg'),
+          ),
+        ]),
+        j,
+      );
+
+      expect(r.errors, isEmpty);
+      expect(r.succeeded, 1);
+      expect(picturesIn(p('album/01.mp3')), 1);
+
+      final u = await undo(j);
+      expect(u.failed, 0);
+      expect(picturesIn(p('album/01.mp3')), 0);
+    });
+
+    test('art is copied out of a sibling track', () async {
+      // The offline pass, which is most of what this feature does: one
+      // track on the album has a cover, the rest get it.
+      copyFixture('album/01.mp3');
+      copyFixture('album/02.mp3');
+      writeImage('album/donor.jpg');
+      await applyPlan(
+        planOf(art: [
+          PlannedAction(
+            kind: ActionKind.embedArt,
+            path: p('album/01.mp3'),
+            artFrom: p('album/donor.jpg'),
+          ),
+        ]),
+        journalIn(),
+      );
+
+      final j2 = Journal(File(p('.journal2.jsonl')));
+      final r = await applyPlan(
+        planOf(art: [
+          PlannedAction(
+            kind: ActionKind.embedArt,
+            path: p('album/02.mp3'),
+            artFrom: p('album/01.mp3'),
+          ),
+        ]),
+        j2,
+      );
+
+      expect(r.errors, isEmpty);
+      expect(picturesIn(p('album/02.mp3')), 1);
+    });
+
+    test('a file that already has a cover is not overwritten', () async {
+      copyFixture('album/01.mp3');
+      writeImage('album/a.jpg', 0x11);
+      writeImage('album/b.jpg', 0x99);
+      await applyPlan(
+        planOf(art: [
+          PlannedAction(
+              kind: ActionKind.embedArt,
+              path: p('album/01.mp3'),
+              artFrom: p('album/a.jpg')),
+        ]),
+        journalIn(),
+      );
+
+      final r = await applyPlan(
+        planOf(art: [
+          PlannedAction(
+              kind: ActionKind.embedArt,
+              path: p('album/01.mp3'),
+              artFrom: p('album/b.jpg')),
+        ]),
+        Journal(File(p('.journal2.jsonl'))),
+      );
+
+      expect(r.failed, 1);
+      expect(r.errors.single, contains('already has a cover'));
+      final picture =
+          readMetadata(File(p('album/01.mp3')), getImage: true).pictures.single;
+      expect(picture.bytes.sublist(3, 8), everyElement(0x11),
+          reason: 'the first cover survived');
+    });
+
+    test('a file with no ID3v2 tag is reported, not counted as done',
+        () async {
+      // The silent failure this check exists for. `setPictures` on a
+      // plain stream of MPEG frames throws nothing, writes nothing, and
+      // leaves the file byte-identical — so without reading back, the
+      // app would report a cover written where none was.
+      final bare = write('album/bare.mp3', 'not really an mp3 at all');
+      final before = bare.readAsBytesSync();
+      writeImage('album/donor.jpg');
+
+      final r = await applyPlan(
+        planOf(art: [
+          PlannedAction(
+              kind: ActionKind.embedArt,
+              path: p('album/bare.mp3'),
+              artFrom: p('album/donor.jpg')),
+        ]),
+        journalIn(),
+      );
+
+      expect(r.succeeded, 0, reason: 'nothing was actually written');
+      expect(r.failed, 1);
+      expect(bare.readAsBytesSync(), before, reason: 'and nothing changed');
+    });
+
+    test('a failed embed is not undone, because it never happened',
+        () async {
+      copyFixture('album/01.mp3');
+      final j = journalIn();
+      await applyPlan(
+        planOf(art: [
+          PlannedAction(
+              kind: ActionKind.embedArt,
+              path: p('album/01.mp3'),
+              artFrom: p('album/missing.jpg')),
+        ]),
+        j,
+      );
+      final u = await undo(j);
+      expect(u.succeeded, 0);
+      expect(u.failed, 0, reason: 'undo only reverses what succeeded');
+    });
+
+    test('the journal survives a round trip through its own format',
+        () async {
+      writeImage('album/donor.jpg');
+      final j = journalIn();
+      await applyPlan(
+        planOf(art: [
+          PlannedAction(
+              kind: ActionKind.writeCover,
+              path: p('album/cover.jpg'),
+              artFrom: p('album/donor.jpg')),
+        ]),
+        j,
+      );
+      final entries = await j.read();
+      expect(entries.single.kind, ActionKind.writeCover);
+      expect(entries.single.path, p('album/cover.jpg'));
+      expect(jsonDecode(await j.file.readAsString().then((s) => s.trim()))
+          ['kind'], 'writeCover');
+    });
   });
 }

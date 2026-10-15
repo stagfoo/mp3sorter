@@ -27,6 +27,12 @@ enum ActionKind {
 
   /// Move a file to the trash directory.
   trash,
+
+  /// Write a cover image into a file's tags.
+  embedArt,
+
+  /// Create a cover image file beside an album.
+  writeCover,
 }
 
 /// One change, described completely enough to be shown, applied, and
@@ -39,6 +45,7 @@ class PlannedAction {
     this.artist,
     this.title,
     this.genres,
+    this.artFrom,
     this.reason = '',
   });
 
@@ -57,12 +64,25 @@ class PlannedAction {
   final String? title;
   final List<String>? genres;
 
+  /// Where a cover's bytes come from, for [ActionKind.embedArt] and
+  /// [ActionKind.writeCover]. Either an audio file carrying embedded art
+  /// or an image file.
+  ///
+  /// A path rather than the bytes themselves, so an art action is the
+  /// same size as any other and a plan with a thousand of them can be
+  /// held, shown and written to a session file without carrying a
+  /// hundred megabytes of JPEG through the app.
+  final String? artFrom;
+
   /// Why, in words, for the review list. A plan nobody can read is a
   /// plan nobody can check.
   final String reason;
 
   bool get changesTags =>
       artist != null || title != null || genres != null;
+
+  bool get isArt =>
+      kind == ActionKind.embedArt || kind == ActionKind.writeCover;
 }
 
 /// Everything that would be done, grouped so it can be approved in parts.
@@ -71,6 +91,7 @@ class Plan {
     required this.moves,
     required this.retags,
     required this.trashes,
+    this.art = const [],
     required this.artistMerges,
     required this.unsortable,
     this.stationaryPaths = const {},
@@ -81,6 +102,11 @@ class Plan {
   final List<PlannedAction> moves;
   final List<PlannedAction> retags;
   final List<PlannedAction> trashes;
+
+  /// Cover art to write. Empty unless art collection was run — it is a
+  /// separate, explicit step, because it is the only part of this app
+  /// that can reach the network.
+  final List<PlannedAction> art;
 
   /// Spelling variants that would be standardised, as canonical → the
   /// variants being folded into it. Shown separately because it is the
@@ -112,10 +138,26 @@ class Plan {
   /// must be free when it runs.
   final Set<String> occupiedPaths;
 
-  int get actionCount => moves.length + retags.length + trashes.length;
+  int get actionCount =>
+      moves.length + retags.length + trashes.length + art.length;
   bool get isEmpty => actionCount == 0;
 
-  List<PlannedAction> get all => [...moves, ...retags, ...trashes];
+  List<PlannedAction> get all => [...moves, ...retags, ...trashes, ...art];
+
+  /// The same plan with art actions attached. Art is collected after a
+  /// plan has been built, so it arrives separately rather than being
+  /// threaded back through [buildPlan].
+  Plan withArt(List<PlannedAction> actions) => Plan(
+        moves: moves,
+        retags: retags,
+        trashes: trashes,
+        art: actions,
+        artistMerges: artistMerges,
+        unsortable: unsortable,
+        stationaryPaths: stationaryPaths,
+        blockedMoves: blockedMoves,
+        occupiedPaths: occupiedPaths,
+      );
 }
 
 /// Where a tidied file ends up.
@@ -652,6 +694,18 @@ List<PlanProblem> validatePlan(Plan plan) {
     problems.add(PlanProblem(
       'would land on a file that is still there',
       collisions,
+    ));
+  }
+
+  // Art and moves in one plan. Both are legitimate; together they are
+  // ambiguous, because a cover is written beside the folder a file is in
+  // *now* and a move changes which folder that is. Rather than guess,
+  // they are kept to separate runs — art is applied on its own.
+  if (plan.art.isNotEmpty && (plan.moves.isNotEmpty || plan.trashes.isNotEmpty)) {
+    problems.add(PlanProblem(
+      'cover art and file moves cannot be applied in one run — '
+      'the cover would be written beside where the files used to be',
+      [for (final a in plan.art.take(5)) a.path],
     ));
   }
 

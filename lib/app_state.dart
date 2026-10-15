@@ -11,7 +11,9 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'apply.dart';
+import 'artwork.dart';
 import 'bitrate.dart';
+import 'cover_art.dart';
 import 'diagnostics.dart';
 import 'duplicates.dart';
 import 'plan.dart';
@@ -63,6 +65,46 @@ class AppState extends ChangeNotifier {
   /// Folders scanned before. Loaded once at startup so the first screen
   /// can offer them without waiting on disk.
   List<RecentFolder> recentFolders = const [];
+
+  // ------------------------------------------------------- album art
+
+  /// What the art pass found on disk. Null until it has been run — it is
+  /// a separate, slower pass than the main scan, because finding out
+  /// whether a file has a cover means reading the cover.
+  ArtScan? artScan;
+
+  /// Albums, and where each one's cover would come from.
+  List<AlbumArt> albums = const [];
+
+  /// Art actions waiting to be approved and applied.
+  List<PlannedAction> artPlan = const [];
+
+  /// One line per album the online pass could not settle. Kept so "47
+  /// not found" can be turned into something readable.
+  List<String> artNotes = const [];
+
+  ApplyResult? lastArtResult;
+
+  /// Whether a lookup has been run this session. Only ever set by the
+  /// person pressing the button — nothing here reaches the network on
+  /// its own.
+  bool artLookupRan = false;
+
+  bool artBusy = false;
+
+  /// Set after art has been written. The art scan describes how things
+  /// were before that run, so the summary on screen is no longer true —
+  /// but it is kept rather than discarded, because it is what the bug
+  /// report needs and discarding it right after a run is discarding it
+  /// exactly when something has gone wrong.
+  bool artIsStale = false;
+
+  ArtSummary? get artSummary =>
+      artScan == null ? null : summariseArtwork(albums);
+
+  /// Albums that only a lookup can settle.
+  List<AlbumArt> get albumsNeedingLookup =>
+      [for (final a in albums) if (a.needsNetwork) a];
 
   Journal? _journal;
 
@@ -198,6 +240,154 @@ class AppState extends ChangeNotifier {
       artistMerges: p.artistMerges,
       unsortable: p.unsortable,
     );
+  }
+
+  /// The art plan with rejected actions removed, as its own run.
+  ///
+  /// Art is applied separately from moves on purpose — see
+  /// [validatePlan]. A cover is written beside the folder a file is in
+  /// now, and a move changes which folder that is.
+  Plan get approvedArt => Plan(
+        moves: const [],
+        retags: const [],
+        trashes: const [],
+        art: [for (final a in artPlan) if (!isRejected(a)) a],
+        artistMerges: const {},
+        unsortable: const [],
+      );
+
+  // ------------------------------------------------------- album art
+
+  /// Finds out what already has art, and what can be filled from a
+  /// sibling or a folder image. Touches no network.
+  Future<void> scanArt() async {
+    final s = scan;
+    if (s == null || artBusy) return;
+
+    artBusy = true;
+    artLookupRan = false;
+    artIsStale = false;
+    artNotes = const [];
+    lastArtResult = null;
+    progressDone = 0;
+    progressTotal = s.tracks.length;
+    progressLabel = 'looking for covers already on the files';
+    notifyListeners();
+
+    final found = await scanAlbumArt(
+      s.tracks,
+      onProgress: (done, total) {
+        progressDone = done;
+        progressTotal = total;
+        if (done % 25 == 0 || done == total) notifyListeners();
+      },
+    );
+
+    artScan = found;
+    albums = planArtwork(
+      s.tracks,
+      embeddedArt: found.embeddedArt,
+      folderImages: found.folderImages,
+    );
+    _rebuildArtPlan();
+    artBusy = false;
+    notifyListeners();
+  }
+
+  void _rebuildArtPlan() {
+    artPlan = artActions(
+      albums,
+      existingCovers: artScan?.existingCovers ?? const {},
+    );
+  }
+
+  /// Asks MusicBrainz and the Cover Art Archive about the albums nothing
+  /// local could settle.
+  ///
+  /// Only ever called from an explicit confirmation. One request per
+  /// second, which is their published limit — see `cover_art.dart`.
+  Future<String> fetchMissingArt({bool Function()? isCancelled}) async {
+    final todo = albumsNeedingLookup;
+    if (todo.isEmpty || artBusy) return 'Nothing to look up.';
+
+    artBusy = true;
+    artLookupRan = true;
+    progressDone = 0;
+    progressTotal = todo.length;
+    progressLabel = 'asking the Cover Art Archive';
+    notifyListeners();
+
+    final dir = await getApplicationDocumentsDirectory();
+    final harvest = CoverArtHarvest(
+      lookup: CoverArtLookup(fetch: httpFetcher()),
+      cacheDir: Directory('${dir.path}/cover-art-cache'),
+    );
+
+    final result = await harvest.run(
+      todo,
+      onProgress: (done, total, what) {
+        progressDone = done;
+        progressTotal = total;
+        progressLabel = what;
+        notifyListeners();
+      },
+      isCancelled: isCancelled,
+    );
+
+    // The downloaded albums replace their needs-a-lookup versions; every
+    // other album is left exactly as it was.
+    final byKey = {
+      for (final a in result.filled) '${a.artist}|${a.album}': a,
+    };
+    albums = [
+      for (final a in albums) byKey['${a.artist}|${a.album}'] ?? a,
+    ];
+    artNotes = result.notes;
+    _rebuildArtPlan();
+
+    artBusy = false;
+    notifyListeners();
+
+    final bits = <String>['Found ${result.filled.length} of ${todo.length}'];
+    if (result.stoppedEarly) {
+      bits.add('stopped early — worth trying again later');
+    }
+    return bits.join(' · ');
+  }
+
+  /// Writes the approved art. Its own run, with its own result.
+  Future<void> applyArt() async {
+    final toRun = approvedArt;
+    if (toRun.isEmpty || artBusy) return;
+
+    artBusy = true;
+    progressDone = 0;
+    progressTotal = toRun.actionCount;
+    progressLabel = 'writing covers';
+    notifyListeners();
+
+    final j = await _openJournal();
+    lastArtResult = await applyPlan(
+      toRun,
+      j,
+      onProgress: (done, total) {
+        progressDone = done;
+        progressTotal = total;
+        if (done % 10 == 0 || done == total) notifyListeners();
+      },
+    );
+
+    // Art changes tags and adds files; it moves nothing, so the file
+    // scan's paths are all still good. What is out of date is the art
+    // scan — the files that just got covers no longer need them. The
+    // plan is dropped so it cannot be run twice; the scan is kept, for
+    // the bug report.
+    artPlan = const [];
+    artIsStale = true;
+
+    artBusy = false;
+    await refreshUndoState();
+    notifyListeners();
   }
 
   // ------------------------------------------------------------ apply
@@ -389,7 +579,34 @@ class AppState extends ChangeNotifier {
               ),
         scanIsStale: scanIsStale,
         now: DateTime.now(),
+        art: _artReport(),
       );
+
+  /// Null when the art pass has never been run, so the report says
+  /// nothing rather than reporting zeros that look like findings.
+  ArtReport? _artReport() {
+    final summary = artSummary;
+    final found = artScan;
+    if (summary == null || found == null) return null;
+    return ArtReport(
+      summary: summary,
+      plannedCovers: artPlan
+          .where((a) => a.kind == ActionKind.writeCover)
+          .length,
+      plannedEmbeds:
+          artPlan.where((a) => a.kind == ActionKind.embedArt).length,
+      lookupRan: artLookupRan,
+      unreadable: found.unreadable,
+      notes: artNotes,
+      lastRun: lastArtResult == null
+          ? null
+          : ApplyOutcome(
+              succeeded: lastArtResult!.succeeded,
+              failed: lastArtResult!.failed,
+              errors: lastArtResult!.errors,
+            ),
+    );
+  }
 
   /// Writes the report beside the collection, for when it is too long to
   /// paste comfortably.

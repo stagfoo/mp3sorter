@@ -8,6 +8,11 @@
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <!-- Only for looking up album art at MusicBrainz and the Cover Art
+         Archive, and only when that is explicitly asked for from the
+         album art screen. Scanning, sorting and tagging never touch a
+         network. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <application
         android:label="mp3sorter"
         android:name="${applicationName}"

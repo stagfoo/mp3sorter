@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'app_state.dart';
+import 'art_screen.dart';
 import 'bitrate.dart';
 import 'diagnostics_screen.dart';
 import 'duplicates.dart';
@@ -188,6 +189,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 _QualityCard(app: app),
                 const SizedBox(height: 12),
                 _DuplicateCard(app: app),
+                const SizedBox(height: 12),
+                _ArtCard(app: app),
                 const SizedBox(height: 12),
                 _OptionsCard(app: app),
                 const SizedBox(height: 16),
@@ -492,6 +495,63 @@ class _Busy extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.bodySmall),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The way into art collection.
+///
+/// Its own card and its own screen rather than a checkbox in the
+/// options, for two reasons: it is the one part of the app that can
+/// reach a network, and it is applied as a separate run from the moves
+/// — a cover goes beside the folder a file is in now, and a move changes
+/// which folder that is.
+class _ArtCard extends StatelessWidget {
+  const _ArtCard({required this.app});
+
+  final AppState app;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final summary = app.artSummary;
+
+    return Card(
+      child: InkWell(
+        onTap: () => Navigator.of(context).push(MaterialPageRoute(
+          builder: (_) => ArtScreen(app: app),
+        )),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            children: [
+              Icon(Icons.album_outlined, color: theme.colorScheme.primary),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Album art', style: theme.textTheme.titleMedium),
+                    const SizedBox(height: 4),
+                    Text(
+                      summary == null
+                          ? 'Fill in missing covers from the album itself, '
+                              'then optionally look the rest up online.'
+                          : summary.allDone
+                              ? 'Every album has a cover.'
+                              : '${summary.filesMissing} files with no '
+                                  'cover · ${summary.filesFixableOffline} '
+                                  'fixable offline',
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right),
+            ],
+          ),
         ),
       ),
     );

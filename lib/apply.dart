@@ -12,9 +12,11 @@ library;
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:audio_metadata_reader/audio_metadata_reader.dart';
 
+import 'cover_art.dart';
 import 'plan.dart';
 
 /// One thing that was done, recorded so it can be undone.
@@ -159,10 +161,19 @@ Future<ApplyResult> applyPlan(
   Journal journal, {
   void Function(int done, int total)? onProgress,
 }) async {
-  // Trash first, then tags, then moves. Order matters: retagging a file
-  // and then moving it means the journal's retag entry names a path that
-  // no longer exists, and undo would fail to find it.
-  final actions = [...plan.trashes, ...plan.retags, ...plan.moves];
+  // Trash first, then tags and art, then moves. Order matters: writing
+  // to a file and then moving it means the journal's entry names a path
+  // that no longer exists, and undo would fail to find it.
+  //
+  // In practice art never shares a run with moves — [validatePlan]
+  // refuses that combination — but the order is correct either way
+  // rather than correct by assumption.
+  final actions = [
+    ...plan.trashes,
+    ...plan.retags,
+    ...plan.art,
+    ...plan.moves,
+  ];
 
   var ok = 0, bad = 0;
   final errors = <String>[];
@@ -199,6 +210,13 @@ Future<JournalEntry> _applyOne(PlannedAction action) async {
   final now = DateTime.now();
   final source = File(action.path);
 
+  // Checked first, because for this one action [path] is a file that is
+  // meant not to exist yet — the guard below would read that as a
+  // failure.
+  if (action.kind == ActionKind.writeCover) {
+    return _writeCoverFile(action, now);
+  }
+
   if (!source.existsSync()) {
     // Distinguishing why matters more than it looks. The commonest cause
     // by far is that an earlier run already moved the file — in which
@@ -218,6 +236,77 @@ Future<JournalEntry> _applyOne(PlannedAction action) async {
   }
 
   switch (action.kind) {
+    case ActionKind.writeCover:
+      // Handled above, before the existence check.
+      throw StateError('unreachable');
+
+    case ActionKind.embedArt:
+      final art = await _readArt(action.artFrom);
+      if (art == null) {
+        return JournalEntry(
+          kind: action.kind,
+          path: action.path,
+          at: now,
+          error: 'could not read a cover from ${action.artFrom}',
+        );
+      }
+
+      // Refusing to overwrite. Art is only planned for files that had
+      // none, so finding one here means the file changed since the art
+      // scan — and replacing somebody's cover is not what was asked for.
+      try {
+        final before = readMetadata(source, getImage: true);
+        if (before.pictures.isNotEmpty) {
+          return JournalEntry(
+            kind: action.kind,
+            path: action.path,
+            at: now,
+            error: 'it already has a cover now — nothing was changed',
+          );
+        }
+      } catch (_) {
+        // Unreadable tags are not a reason to refuse to write a cover;
+        // the same rule the retag path follows.
+      }
+
+      updateMetadata(source, (m) {
+        m.setPictures(
+            [Picture(art.bytes, art.mimeType, PictureType.coverFront)]);
+      });
+
+      // Read back, because the write can do nothing and say nothing.
+      //
+      // An MP3 with no ID3v2 tag at all — a plain stream of frames, which
+      // a good number of older rips are — accepts `setPictures` without
+      // complaint, writes zero bytes, and leaves the file byte-identical.
+      // Verified against a tagless file: no exception, no change in
+      // length, no picture afterwards. Without this check the app would
+      // report four thousand covers written while several hundred files
+      // got nothing, and the only way to find out would be noticing the
+      // covers were still missing.
+      var landed = false;
+      try {
+        landed = readMetadata(source, getImage: true).pictures.isNotEmpty;
+      } catch (_) {
+        // Unreadable after writing is its own kind of wrong; treated as
+        // not landed, which is the safe reading.
+      }
+      if (!landed) {
+        return JournalEntry(
+          kind: action.kind,
+          path: action.path,
+          at: now,
+          error: 'the cover would not stick — this file has no ID3v2 tag '
+              'for one to go in',
+        );
+      }
+
+      return JournalEntry(
+        kind: ActionKind.embedArt,
+        path: action.path,
+        at: now,
+      );
+
     case ActionKind.retag:
       String? wasArtist;
       String? wasTitle;
@@ -273,6 +362,87 @@ Future<JournalEntry> _applyOne(PlannedAction action) async {
         at: now,
       );
   }
+}
+
+/// A cover, ready to write.
+class _Art {
+  const _Art(this.bytes, this.mimeType);
+  final Uint8List bytes;
+  final String mimeType;
+}
+
+/// Reads a cover out of whatever it was told to read it from.
+///
+/// Two shapes, because the offline pass finds art in two places: inside
+/// another track on the album, and in an image file beside it. A
+/// downloaded cover arrives as the second of those — written to a cache
+/// file first so an art action is always just a pair of paths.
+///
+/// The bytes are sniffed rather than trusted. An extension is a claim,
+/// and embedding a PNG labelled `image/jpeg` produces a cover that some
+/// players show and others silently drop.
+Future<_Art?> _readArt(String? from) async {
+  if (from == null || from.isEmpty) return null;
+  final file = File(from);
+  if (!file.existsSync()) return null;
+
+  if (from.toLowerCase().endsWith('.mp3')) {
+    try {
+      final meta = readMetadata(file, getImage: true);
+      if (meta.pictures.isEmpty) return null;
+      // The front cover if the file says which is which, otherwise the
+      // first picture — a file with one untyped picture is the common
+      // case, and that picture is the cover.
+      final picture = meta.pictures.firstWhere(
+        (p) => p.pictureType == PictureType.coverFront,
+        orElse: () => meta.pictures.first,
+      );
+      final sniffed = sniffImageType(picture.bytes);
+      if (sniffed == null || !kEmbeddableTypes.contains(sniffed)) return null;
+      return _Art(picture.bytes, sniffed);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  final bytes = await file.readAsBytes();
+  final sniffed = sniffImageType(bytes);
+  if (sniffed == null || !kEmbeddableTypes.contains(sniffed)) return null;
+  return _Art(bytes, sniffed);
+}
+
+/// Writes a `cover.jpg` beside an album.
+///
+/// Never over an existing file. A cover already sitting there was put
+/// there by somebody — possibly a better one than this — and the whole
+/// arrangement of this app is that nothing is replaced without being
+/// shown first.
+Future<JournalEntry> _writeCoverFile(PlannedAction action, DateTime now) async {
+  final destination = File(action.path);
+
+  if (destination.existsSync()) {
+    return JournalEntry(
+      kind: action.kind,
+      path: action.path,
+      at: now,
+      error: 'a cover is already there — it was left alone',
+    );
+  }
+
+  final art = await _readArt(action.artFrom);
+  if (art == null) {
+    return JournalEntry(
+      kind: action.kind,
+      path: action.path,
+      at: now,
+      error: 'could not read a cover from ${action.artFrom}',
+    );
+  }
+
+  await destination.parent.create(recursive: true);
+  await destination.writeAsBytes(art.bytes, flush: true);
+
+  return JournalEntry(kind: action.kind, path: action.path, at: now);
 }
 
 /// Moves a file, falling back to copy-and-delete across filesystems.
@@ -371,6 +541,24 @@ Future<ApplyResult> undo(Journal journal,
             m.setTitle(e.previousTitle);
             if (e.previousGenres != null) m.setGenres(e.previousGenres!);
           });
+
+        case ActionKind.embedArt:
+          final f = File(e.path);
+          if (!f.existsSync()) {
+            throw FileSystemException('file is gone', e.path);
+          }
+          // Cleared outright rather than restored. Art is only ever
+          // embedded into files that had none — apply re-checks that
+          // immediately before writing — so "what it was before" is
+          // nothing, and that is what it goes back to.
+          updateMetadata(f, (m) => m.setPictures(const []));
+
+        case ActionKind.writeCover:
+          final cover = File(e.path);
+          // Only a cover this run created is journalled, so removing it
+          // cannot take somebody else's. A cover already gone is not a
+          // failure — there is nothing left to undo.
+          if (cover.existsSync()) await cover.delete();
       }
       ok++;
     } catch (err) {

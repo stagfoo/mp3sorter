@@ -9,6 +9,7 @@
 /// clipboards or files, so what it produces can be asserted in a test.
 library;
 
+import 'artwork.dart';
 import 'bitrate.dart';
 import 'duplicates.dart';
 import 'plan.dart';
@@ -30,6 +31,7 @@ String buildBugReport({
   required ApplyOutcome? lastRun,
   required bool scanIsStale,
   required DateTime now,
+  ArtReport? art,
 }) {
   final b = StringBuffer();
   void line([String s = '']) => b.writeln(s);
@@ -97,6 +99,45 @@ String buildBugReport({
       '${(summary.reclaimableBytes / 1073741824).toStringAsFixed(2)} GB');
   line();
 
+  if (art != null) {
+    line('-- album art --');
+    line('albums ${art.summary.albums}  complete ${art.summary.complete}');
+    line('files missing art ${art.summary.filesMissing}  '
+        'fixable offline ${art.summary.filesFixableOffline}');
+    line('from a sibling ${art.summary.fromSibling}  '
+        'from a folder image ${art.summary.fromFolder}  '
+        'need a lookup ${art.summary.needLookup}');
+    line('actions planned ${art.plannedCovers} covers, '
+        '${art.plannedEmbeds} embeds');
+    line('lookup ran ${art.lookupRan}');
+    if (art.unreadable.isNotEmpty) {
+      line();
+      line('unreadable while reading covers (${art.unreadable.length}):');
+      for (final u in art.unreadable) {
+        line('  $u');
+      }
+    }
+    if (art.notes.isNotEmpty) {
+      // Every album, same reasoning as the failures below: a pattern
+      // across all of them — one artist spelled oddly, say — is the
+      // diagnosis, and a truncated list hides it.
+      line();
+      line('albums still without a cover (${art.notes.length}):');
+      for (final n in art.notes) {
+        line('  $n');
+      }
+    }
+    if (art.lastRun != null) {
+      line();
+      line('art run: applied ${art.lastRun!.succeeded}  '
+          'failed ${art.lastRun!.failed}');
+      for (final e in art.lastRun!.errors) {
+        line('  $e');
+      }
+    }
+    line();
+  }
+
   line('-- last run --');
   if (lastRun == null) {
     line('(none)');
@@ -150,4 +191,30 @@ Map<String, int> summariseErrors(List<String> errors) {
   return Map.fromEntries(
     counts.entries.toList()..sort((a, b) => b.value.compareTo(a.value)),
   );
+}
+
+/// The art pass, as the report needs it.
+///
+/// A separate type rather than more parameters on [buildBugReport],
+/// because art is a separate pass that may not have been run at all —
+/// and a report that invents zeros for a pass that never happened reads
+/// as "it found nothing" rather than "it was not asked".
+class ArtReport {
+  const ArtReport({
+    required this.summary,
+    required this.plannedCovers,
+    required this.plannedEmbeds,
+    required this.lookupRan,
+    required this.unreadable,
+    required this.notes,
+    required this.lastRun,
+  });
+
+  final ArtSummary summary;
+  final int plannedCovers;
+  final int plannedEmbeds;
+  final bool lookupRan;
+  final List<String> unreadable;
+  final List<String> notes;
+  final ApplyOutcome? lastRun;
 }
