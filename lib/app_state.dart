@@ -12,11 +12,13 @@ import 'package:path_provider/path_provider.dart';
 
 import 'apply.dart';
 import 'bitrate.dart';
+import 'diagnostics.dart';
 import 'duplicates.dart';
 import 'plan.dart';
 import 'recent_folders.dart';
 import 'scanner.dart';
 import 'session_file.dart';
+import 'version.dart';
 import 'track.dart';
 
 enum Stage { idle, scanning, scanned, applying, done }
@@ -365,6 +367,46 @@ class AppState extends ChangeNotifier {
   }
 
   DuplicateSummary get duplicateSummary => summariseDuplicates(duplicates);
+
+  /// The copyable bug report.
+  String bugReport() => buildBugReport(
+        appVersion: kAppVersion,
+        platform: '${Platform.operatingSystem} '
+            '${Platform.operatingSystemVersion}',
+        rootPath: rootPath,
+        scan: scan,
+        plan: plan,
+        duplicates: duplicates,
+        lastRun: lastResult == null
+            ? null
+            : ApplyOutcome(
+                succeeded: lastResult!.succeeded,
+                failed: lastResult!.failed,
+                errors: lastResult!.errors,
+              ),
+        scanIsStale: scanIsStale,
+        now: DateTime.now(),
+      );
+
+  /// Writes the report beside the collection, for when it is too long to
+  /// paste comfortably.
+  Future<String?> saveBugReport() async {
+    final root = rootPath;
+    if (root == null) return null;
+    final stamp = DateTime.now()
+        .toIso8601String()
+        .substring(0, 16)
+        .replaceAll(RegExp(r'[:-]'), '');
+    final path = '$root/mp3sorter-bug-$stamp.txt';
+    try {
+      final f = File(path);
+      await f.parent.create(recursive: true);
+      await f.writeAsString(bugReport());
+      return path;
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// Files in one quality band, worst first, for the browse screen.
   ///

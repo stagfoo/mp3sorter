@@ -481,6 +481,8 @@ void main() {
     });
   });
 
+  _orderingTests();
+
   group('validating a plan before it runs', () {
     test('a clean plan has no problems', () {
       final p = buildPlan([
@@ -521,6 +523,145 @@ void main() {
         unsortable: [],
       );
       expect(validatePlan(plan), isNotEmpty);
+    });
+  });
+}
+
+/// Rename ordering — the third bug of this class to reach a device.
+///
+/// Each of these is a permutation of names that already exist, which is
+/// what a rescan of an already-sorted folder produces. Individually every
+/// move is fine; the order is what decides whether they work.
+void _orderingTests() {
+  PlannedAction move(String from, String to) => PlannedAction(
+        kind: ActionKind.move,
+        path: from,
+        targetPath: to,
+      );
+
+  group('ordering moves', () {
+    test('a move onto a name being vacated runs after the vacating', () {
+      // The exact device failure: (2) was planned onto (320k), which was
+      // itself moving, but ran first and found it still there.
+      final moves = [
+        move('/m/Megitsune (2).mp3', '/m/Megitsune (320k).mp3'),
+        move('/m/Megitsune (320k).mp3', '/m/Megitsune.mp3'),
+      ];
+      final occupied = {
+        '/m/megitsune (2).mp3',
+        '/m/megitsune (320k).mp3',
+      };
+      final result = orderMoves(moves, occupied);
+
+      expect(result.blocked, isEmpty);
+      final order = result.ordered.map((m) => m.path).toList();
+      expect(order.indexOf('/m/Megitsune (320k).mp3'),
+          lessThan(order.indexOf('/m/Megitsune (2).mp3')),
+          reason: 'the name has to be freed before it is taken');
+    });
+
+    test('a chain of three is ordered end-first', () {
+      final moves = [
+        move('/m/a.mp3', '/m/b.mp3'),
+        move('/m/b.mp3', '/m/c.mp3'),
+        move('/m/c.mp3', '/m/d.mp3'),
+      ];
+      final result =
+          orderMoves(moves, {'/m/a.mp3', '/m/b.mp3', '/m/c.mp3'});
+      expect(result.blocked, isEmpty);
+      expect(result.ordered.map((m) => m.path),
+          ['/m/c.mp3', '/m/b.mp3', '/m/a.mp3']);
+    });
+
+    test('every move is still present after ordering', () {
+      final moves = [
+        move('/m/a.mp3', '/m/b.mp3'),
+        move('/m/b.mp3', '/m/c.mp3'),
+        move('/m/x.mp3', '/m/y.mp3'),
+      ];
+      final result = orderMoves(moves, {'/m/a.mp3', '/m/b.mp3', '/m/x.mp3'});
+      expect(result.ordered.length + result.blocked.length, moves.length);
+      expect(result.ordered.map((m) => m.path).toSet(),
+          {'/m/a.mp3', '/m/b.mp3', '/m/x.mp3'});
+    });
+
+    test('independent moves keep their original order', () {
+      // A plan with no constraints must not reshuffle, or the review
+      // list rearranges itself for no reason.
+      final moves = [
+        move('/m/1.mp3', '/m/one.mp3'),
+        move('/m/2.mp3', '/m/two.mp3'),
+        move('/m/3.mp3', '/m/three.mp3'),
+      ];
+      final result = orderMoves(moves, {'/m/1.mp3', '/m/2.mp3', '/m/3.mp3'});
+      expect(result.ordered.map((m) => m.path),
+          ['/m/1.mp3', '/m/2.mp3', '/m/3.mp3']);
+    });
+
+    test('a two-file swap is reported rather than attempted', () {
+      // Impossible without a temporary name, so it is surfaced instead
+      // of being half-done.
+      final moves = [
+        move('/m/a.mp3', '/m/b.mp3'),
+        move('/m/b.mp3', '/m/a.mp3'),
+      ];
+      final result = orderMoves(moves, {'/m/a.mp3', '/m/b.mp3'});
+      expect(result.ordered, isEmpty);
+      expect(result.blocked, hasLength(2));
+    });
+
+    test('a cycle does not block the moves around it', () {
+      final moves = [
+        move('/m/a.mp3', '/m/b.mp3'),
+        move('/m/b.mp3', '/m/a.mp3'),
+        move('/m/free.mp3', '/m/elsewhere.mp3'),
+      ];
+      final result =
+          orderMoves(moves, {'/m/a.mp3', '/m/b.mp3', '/m/free.mp3'});
+      expect(result.ordered.map((m) => m.path), ['/m/free.mp3']);
+      expect(result.blocked, hasLength(2));
+    });
+
+    test('a target nothing occupies needs no ordering', () {
+      final moves = [move('/m/a.mp3', '/m/brand-new.mp3')];
+      final result = orderMoves(moves, {'/m/a.mp3'});
+      expect(result.ordered, hasLength(1));
+    });
+
+    test('an empty list is empty, not a crash', () {
+      final result = orderMoves(const [], const {});
+      expect(result.ordered, isEmpty);
+      expect(result.blocked, isEmpty);
+    });
+  });
+
+  group('a plan over an already-sorted folder is safely ordered', () {
+    test('no move lands on a name still occupied at its turn', () {
+      // The whole-plan version of the above, from the device: three
+      // files sharing tags, already carrying suffixes from a past run.
+      final tracks = [
+        t('/music/_sorted/Babymetal/Megitsune.mp3',
+            artist: 'Babymetal', title: 'Megitsune',
+            bitrate: 192, fingerprint: 'f1'),
+        t('/music/_sorted/Babymetal/Megitsune (320k).mp3',
+            artist: 'Babymetal', title: 'Megitsune',
+            bitrate: 320, fingerprint: 'f2'),
+        t('/music/_sorted/Babymetal/Megitsune (2).mp3',
+            artist: 'Babymetal', title: 'Megitsune',
+            bitrate: 320, fingerprint: 'f3'),
+      ];
+      final plan =
+          buildPlan(tracks, const PlanOptions(root: '/music/_sorted'));
+
+      // Walk the plan the way the applier will and check each target is
+      // free when its turn comes.
+      final onDisk = {for (final x in tracks) x.path.toLowerCase()};
+      for (final m in plan.moves) {
+        expect(onDisk.contains(m.targetPath!.toLowerCase()), isFalse,
+            reason: '${m.path} lands on an occupied ${m.targetPath}');
+        onDisk.remove(m.path.toLowerCase());
+        onDisk.add(m.targetPath!.toLowerCase());
+      }
     });
   });
 }

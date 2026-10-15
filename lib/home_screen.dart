@@ -15,6 +15,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'app_state.dart';
 import 'bitrate.dart';
+import 'diagnostics_screen.dart';
 import 'duplicates.dart';
 import 'plan.dart';
 import 'recent_folders.dart';
@@ -123,6 +124,13 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text('MP3 Sorter'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.bug_report_outlined),
+            tooltip: 'Bug report',
+            onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+              builder: (_) => DiagnosticsScreen(app: app),
+            )),
+          ),
           if (app.canUndo)
             TextButton.icon(
               icon: const Icon(Icons.undo),
@@ -802,6 +810,15 @@ class _ResultCard extends StatelessWidget {
               if (r.errors.length > 8)
                 Text('…and ${r.errors.length - 8} more',
                     style: theme.textTheme.bodySmall),
+              const SizedBox(height: 8),
+              FilledButton.tonalIcon(
+                icon: const Icon(Icons.bug_report_outlined, size: 18),
+                label: const Text('Open the full report'),
+                onPressed: () =>
+                    Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => DiagnosticsScreen(app: app),
+                )),
+              ),
             ],
           ],
         ),

@@ -73,6 +73,7 @@ class Plan {
     required this.artistMerges,
     required this.unsortable,
     this.stationaryPaths = const {},
+    this.blockedMoves = const [],
   });
 
   final List<PlannedAction> moves;
@@ -99,6 +100,10 @@ class Plan {
   /// invisible to the planner and the next file with the same tags gets
   /// planned straight on top of it.
   final Set<String> stationaryPaths;
+
+  /// Moves that could not be safely ordered because they form a rename
+  /// cycle. Shown rather than attempted — see [orderMoves].
+  final List<PlannedAction> blockedMoves;
 
   int get actionCount => moves.length + retags.length + trashes.length;
   bool get isEmpty => actionCount == 0;
@@ -311,14 +316,110 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
     ));
   }
 
+  // Moves are reordered so a file never lands on a name that is still
+  // occupied when its turn comes. See [orderMoves].
+  final occupied = {
+    for (final t in tracks) t.path.toLowerCase(),
+  };
+  final ordered = orderMoves(moves, occupied);
+
   return Plan(
-    moves: moves,
+    moves: ordered.ordered,
     retags: retags,
     trashes: trashes,
     artistMerges: merges,
     unsortable: unsortable,
     stationaryPaths: stationary,
+    blockedMoves: ordered.blocked,
   );
+}
+
+/// The result of working out a safe order for a set of moves.
+class OrderedMoves {
+  const OrderedMoves(this.ordered, this.blocked);
+
+  /// Moves in an order where each one's target is free by the time it
+  /// runs.
+  final List<PlannedAction> ordered;
+
+  /// Moves that cannot be placed in any safe order, because they form a
+  /// cycle — two files swapping names, or a longer ring. Dropped rather
+  /// than attempted: carrying them out needs a temporary name, and
+  /// inventing one for a case this rare is more machinery than the
+  /// problem deserves. They are reported so they can be settled by hand
+  /// or as duplicates.
+  final List<PlannedAction> blocked;
+}
+
+/// Orders moves so each one's destination is free when it runs.
+///
+/// The bug this exists for, seen on a device twice. Three files share
+/// one set of tags, so they compete for one name and get disambiguated
+/// suffixes. On a rescan the planner reassigns those suffixes — and the
+/// assignment is a *permutation of names that already exist*:
+///
+/// ```
+/// Megitsune (2).mp3     -> Megitsune (320k).mp3   ← occupied right now
+/// Megitsune (320k).mp3  -> Megitsune (2).mp3      ← also occupied
+/// ```
+///
+/// Each move is individually fine and the pair is impossible in the
+/// order written. Treating a path as free because its occupant is
+/// leaving is only true once the occupant has actually left.
+///
+/// Kahn's algorithm over "this move must wait for that one". Pure, so
+/// the ordering can be tested without a filesystem.
+OrderedMoves orderMoves(
+  List<PlannedAction> moves,
+  Set<String> occupiedNow,
+) {
+  // Which move frees which path.
+  final vacatedBy = <String, PlannedAction>{
+    for (final m in moves) m.path.toLowerCase(): m,
+  };
+
+  // A move must wait for whichever move is vacating its target. A target
+  // nobody currently occupies has nothing to wait for. At most one thing
+  // can occupy a path, so this is one dependency per move, not a list.
+  final waitsFor = <PlannedAction, PlannedAction?>{};
+  // And the other direction: who is waiting on this move to finish.
+  final waitedOnBy = <PlannedAction, List<PlannedAction>>{
+    for (final m in moves) m: <PlannedAction>[],
+  };
+
+  for (final m in moves) {
+    final target = m.targetPath!.toLowerCase();
+    final dependency = occupiedNow.contains(target) ? vacatedBy[target] : null;
+    // A move onto its own path depends on nothing; the planner drops
+    // those anyway, but the ordering must not deadlock on one.
+    if (dependency == null || identical(dependency, m)) {
+      waitsFor[m] = null;
+    } else {
+      waitsFor[m] = dependency;
+      waitedOnBy[dependency]!.add(m);
+    }
+  }
+
+  // Kahn's algorithm, forwards. Original order is preserved among moves
+  // with nothing to wait for, so a plan with no constraints comes back
+  // unchanged and the review list does not reshuffle for no reason.
+  final ready = [for (final m in moves) if (waitsFor[m] == null) m];
+  final ordered = <PlannedAction>[];
+  final done = <PlannedAction>{};
+
+  while (ready.isNotEmpty) {
+    final m = ready.removeAt(0);
+    if (!done.add(m)) continue;
+    ordered.add(m);
+    for (final waiter in waitedOnBy[m]!) {
+      if (!done.contains(waiter)) ready.add(waiter);
+    }
+  }
+
+  // Whatever never became ready is in a cycle.
+  final blocked = [for (final m in moves) if (!done.contains(m)) m];
+
+  return OrderedMoves(ordered, blocked);
 }
 
 /// Finds a free name when two tracks want the same one.

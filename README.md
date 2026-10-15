@@ -200,6 +200,44 @@ plugin imports, so it tests with no device attached.
 **132 tests.** `tool/verify_bitrate.dart` and `tool/dry_run.dart` are not
 tests — they run against a real collection and need `ffprobe`.
 
+## The bug report
+
+A bug icon in the app bar, and a button on any failed run, opens a
+report with a **Copy everything** button. It carries the version,
+platform, collection size, plan shape, and **every** failure — not the
+first eight.
+
+That last part is the point. Two bugs were diagnosed from screenshots
+that truncated at eight failures with "…and 112 more", and both times the
+pattern across the remaining hundred was the diagnosis. The report also
+groups failures by cause rather than by file, so a hundred instances of
+one problem read as one problem.
+
+It can also be saved beside the music, for when it is too long to paste.
+
+## Rename ordering
+
+Moves are ordered so a file never lands on a name that is still occupied
+when its turn comes.
+
+This is the third bug of one family to reach a device, and the subtlest.
+Three files sharing tags compete for one name and get suffixes. On a
+rescan the planner reassigns those suffixes — and the assignment is a
+*permutation of names that already exist*:
+
+```
+Megitsune (2).mp3     -> Megitsune (320k).mp3   ← occupied right now
+Megitsune (320k).mp3  -> Megitsune.mp3
+```
+
+Each move is fine on its own; in that order the first one fails. Treating
+a path as free because its occupant is leaving is only true once the
+occupant has actually left.
+
+`orderMoves` is a topological sort over "this move must wait for that
+one". A cycle — two files swapping names — cannot be done without a
+temporary name, so those are reported rather than half-attempted.
+
 ## Planning happens in two passes
 
 Where a file can go depends on which names will still be occupied
