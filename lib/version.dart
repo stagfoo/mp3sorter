@@ -4,4 +4,4 @@
 /// pubspec, because reading the real one needs package_info_plus and a
 /// platform channel — more moving parts than a diagnostic string is
 /// worth.
-const String kAppVersion = '1.0.10';
+const String kAppVersion = '1.0.11';
