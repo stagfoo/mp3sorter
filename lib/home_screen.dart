@@ -157,6 +157,8 @@ class _HomeScreenState extends State<HomeScreen> {
             children: [
               if (app.lastResult != null) _ResultCard(app: app),
               if (app.scanIsStale && app.scan != null) _StaleCard(app: app),
+              if (!app.scanIsStale && app.lastReuse != null)
+                _ReuseLine(app: app),
               Card(
                 child: ListTile(
                   leading: const Icon(Icons.folder_open),
@@ -360,6 +362,56 @@ class _RecentRow extends StatelessWidget {
   }
 }
 
+/// What the scan got for free.
+///
+/// Worth a line on screen because the behaviour is otherwise alarming: a
+/// scan that used to take three minutes now finishes before the progress
+/// bar has drawn, which reads as a scan that failed. Saying so is
+/// cheaper than explaining it afterwards.
+class _ReuseLine extends StatelessWidget {
+  const _ReuseLine({required this.app});
+
+  final AppState app;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final reuse = app.lastReuse!;
+    if (reuse.total == 0) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: Row(
+        children: [
+          Icon(
+            reuse.everythingReused ? Icons.bolt : Icons.sync,
+            size: 15,
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              reuse.describe(),
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+          ),
+          if (reuse.reused > 0)
+            TextButton(
+              // The escape hatch. Reuse rests on size and modification
+              // time telling the truth about whether a file changed —
+              // which is what make and rsync rest on — but a card
+              // restored from a backup that preserved both would leave
+              // the index describing files that are not what it thinks.
+              onPressed: () => app.forceFullRescan(),
+              child: const Text('Read everything again'),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class _StaleCard extends StatelessWidget {
   const _StaleCard({required this.app});
 
@@ -387,15 +439,34 @@ class _StaleCard extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             Text(
-              'Files have moved since it was taken, so the plan points at '
-              'paths that no longer exist. Check what is still there, or '
-              'scan again from scratch.',
+              'Files may have moved since it was taken, so the plan could '
+              'point at paths that are no longer there. Rescanning is now '
+              'the cheap option — only the files that actually changed '
+              'get read.',
               style: theme.textTheme.bodySmall,
             ),
             const SizedBox(height: 10),
             Row(
               children: [
                 FilledButton.tonal(
+                  // A rescan rather than the old "do the paths still
+                  // exist" pass. That pass existed because a real scan
+                  // cost three minutes; with the index it costs about a
+                  // second, and unlike the cheap check it also picks up
+                  // files that changed rather than only ones that left.
+                  onPressed: () async {
+                    final root = app.rootPath;
+                    if (root == null) return;
+                    await app.scanFolder(root);
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text(app.lastReuse?.describe() ?? 'Rescanned.'),
+                    ));
+                  },
+                  child: const Text('Rescan'),
+                ),
+                const SizedBox(width: 8),
+                TextButton(
                   onPressed: () async {
                     final missing = await app.verifyPaths();
                     if (!context.mounted) return;
@@ -406,7 +477,7 @@ class _StaleCard extends StatelessWidget {
                               'from the plan.'),
                     ));
                   },
-                  child: const Text('Check files'),
+                  child: const Text('Just check they exist'),
                 ),
               ],
             ),

@@ -14,6 +14,7 @@ class Track {
   const Track({
     required this.path,
     required this.sizeBytes,
+    this.modifiedMs = 0,
     this.artist,
     this.title,
     this.album,
@@ -31,6 +32,19 @@ class Track {
 
   final String path;
   final int sizeBytes;
+
+  /// When the file was last written, as epoch milliseconds.
+  ///
+  /// Carried so a rescan can tell, from a `stat` alone, that a file has
+  /// not changed and does not need reading again. That matters more than
+  /// it sounds: reading a file costs about 3.7ms, almost all of it the
+  /// 128 KB the fingerprint samples, while `stat`ing all 5,303 files
+  /// costs 56ms in total. Size and modification time together are what
+  /// `make` and `rsync` use for the same decision.
+  ///
+  /// Zero means unknown — a track from a saved scan written before this
+  /// existed — which reads as "not reusable" rather than "unchanged".
+  final int modifiedMs;
 
   final String? artist;
   final String? title;
@@ -82,15 +96,27 @@ class Track {
     return dot <= 0 ? name : name.substring(0, dot);
   }
 
+  /// Whether a `stat` says this file is untouched since it was read.
+  ///
+  /// Both halves are needed. A size match alone misses an edit that
+  /// replaced as many bytes as it removed; a time match alone misses a
+  /// filesystem whose clock went backwards. Unknown times never match,
+  /// so an old saved scan is re-read rather than trusted.
+  bool matchesStamp(int size, int modified) =>
+      modifiedMs != 0 && sizeBytes == size && modifiedMs == modified;
+
   Track copyWith({
     String? path,
+    int? sizeBytes,
+    int? modifiedMs,
     String? artist,
     String? title,
     List<String>? genres,
   }) =>
       Track(
         path: path ?? this.path,
-        sizeBytes: sizeBytes,
+        sizeBytes: sizeBytes ?? this.sizeBytes,
+        modifiedMs: modifiedMs ?? this.modifiedMs,
         artist: artist ?? this.artist,
         title: title ?? this.title,
         album: album,
@@ -114,6 +140,7 @@ class Track {
   Map<String, Object?> toJson() => {
         'path': path,
         'size': sizeBytes,
+        if (modifiedMs != 0) 'mtime': modifiedMs,
         if (artist != null) 'artist': artist,
         if (title != null) 'title': title,
         if (album != null) 'album': album,
@@ -138,6 +165,7 @@ class Track {
     return Track(
       path: path,
       sizeBytes: (j['size'] as num?)?.toInt() ?? 0,
+      modifiedMs: (j['mtime'] as num?)?.toInt() ?? 0,
       artist: j['artist'] as String?,
       title: j['title'] as String?,
       album: j['album'] as String?,

@@ -23,6 +23,7 @@ import 'bitrate.dart';
 import 'cover_art.dart';
 import 'file_source.dart';
 import 'track.dart';
+import 'track_index.dart';
 
 /// Extensions worth opening. Anything else in the folder is ignored
 /// rather than reported as an error — a collection has cover art and
@@ -66,6 +67,7 @@ class ScanResult {
     required this.tracks,
     required this.skipped,
     required this.elapsed,
+    this.reuse = const ReuseStats(reused: 0, read: 0, vanished: 0),
   });
 
   final List<Track> tracks;
@@ -77,6 +79,9 @@ class ScanResult {
 
   final Duration elapsed;
 
+  /// How much came from the index rather than from the disk.
+  final ReuseStats reuse;
+
   int get readable => tracks.where((t) => t.isReadable).length;
 }
 
@@ -84,15 +89,32 @@ class ScanResult {
 ///
 /// [onProgress] fires per file so a scan of thousands can show where it
 /// is rather than appearing hung.
+///
+/// [reuse] is an index from a previous scan. Any file whose size and
+/// modification time match what the index recorded is taken from the
+/// index instead of being opened — which is the difference between a
+/// rescan costing 22 seconds and costing a fifth of one, because
+/// reading a file costs 3.7ms and `stat`ing it costs about ten
+/// microseconds. An index for a different root is ignored.
 Future<ScanResult> scanDirectory(
   Directory root, {
   void Function(int done, String path)? onProgress,
   bool Function()? isCancelled,
+  TrackIndex? reuse,
 }) async {
   final sw = Stopwatch()..start();
   final tracks = <Track>[];
   final skipped = <String>[];
   var done = 0;
+
+  // Only an index of this very folder. A collection remounted at a
+  // different path is a different set of paths, and matching on size and
+  // time across them would be matching on nothing.
+  final cached = (reuse != null && _samePath(reuse.rootPath, root.path))
+      ? reuse.byPath
+      : const <String, Track>{};
+  final seen = <String>{};
+  var reused = 0, readFromDisk = 0;
 
   final entries = <File>[];
   try {
@@ -114,11 +136,64 @@ Future<ScanResult> scanDirectory(
     if (isCancelled?.call() ?? false) break;
     done++;
     onProgress?.call(done, file.path);
+    seen.add(file.path);
+
+    // One `stat`, then usually nothing else at all.
+    final known = cached[file.path];
+    if (known != null) {
+      FileStat? stat;
+      try {
+        stat = file.statSync();
+      } catch (_) {
+        // Unreadable right now. Falls through to a real read, which
+        // will record the failure properly.
+      }
+      if (stat != null &&
+          known.matchesStamp(
+              stat.size, stat.modified.millisecondsSinceEpoch)) {
+        tracks.add(known);
+        reused++;
+        continue;
+      }
+    }
+
+    readFromDisk++;
     tracks.add(await readTrack(file));
   }
 
   sw.stop();
-  return ScanResult(tracks: tracks, skipped: skipped, elapsed: sw.elapsed);
+  return ScanResult(
+    tracks: tracks,
+    skipped: skipped,
+    elapsed: sw.elapsed,
+    reuse: ReuseStats(
+      reused: reused,
+      read: readFromDisk,
+      // Files the index knew that the walk did not find. Counted rather
+      // than acted on: they are simply absent from the new scan, which
+      // is the correct outcome, and the number is worth seeing because a
+      // card half-mounted reports thousands of them.
+      // Through a set, not a nested scan: `entries.any` inside a loop
+      // over 5,303 cached paths is 28 million string comparisons for a
+      // number that is only shown on screen.
+      vanished: cached.isEmpty
+          ? 0
+          : cached.keys.where((p) => !seen.contains(p)).length,
+    ),
+  );
+}
+
+/// Compares two folder paths, ignoring a trailing slash.
+bool _samePath(String a, String b) {
+  String tidy(String p) {
+    var out = p.trim();
+    while (out.length > 1 && out.endsWith('/')) {
+      out = out.substring(0, out.length - 1);
+    }
+    return out;
+  }
+
+  return tidy(a) == tidy(b);
 }
 
 /// Reads one file into a [Track].
@@ -127,7 +202,17 @@ Future<ScanResult> scanDirectory(
 /// [Track.readError] set, so it appears in the report instead of
 /// disappearing from it.
 Future<Track> readTrack(File file) async {
-  final size = await file.length();
+  // One `stat` for both, rather than a length call and a time call.
+  FileStat? stat;
+  try {
+    stat = file.statSync();
+  } catch (_) {
+    // Left null; the size falls back to zero and the stamp to unknown,
+    // which means the next scan re-reads this file rather than trusting
+    // a stamp that was never read.
+  }
+  final size = stat?.size ?? 0;
+  final modifiedMs = stat?.modified.millisecondsSinceEpoch ?? 0;
 
   FileByteSource? source;
   Mp3Info? info;
@@ -165,6 +250,7 @@ Future<Track> readTrack(File file) async {
   return Track(
     path: file.path,
     sizeBytes: size,
+    modifiedMs: modifiedMs,
     artist: artist,
     title: title,
     album: album,
@@ -192,6 +278,8 @@ class ArtScan {
     required this.existingCovers,
     required this.unreadable,
     required this.elapsed,
+    this.checked = const {},
+    this.reusedCount = 0,
   });
 
   /// Paths that already carry a cover, mapped to its mimetype.
@@ -207,6 +295,13 @@ class ArtScan {
 
   final List<String> unreadable;
   final Duration elapsed;
+
+  /// Paths the pass actually looked at, whether or not art was found.
+  /// Carried into the index so the next pass can skip them.
+  final Set<String> checked;
+
+  /// How many covers were taken from the index rather than read.
+  final int reusedCount;
 }
 
 /// Finds out which files have art and which folders have an image.
@@ -217,15 +312,30 @@ class ArtScan {
 /// thousand files is quick. This pass reads every embedded image to
 /// decide whether there is one, so it is behind its own button with its
 /// own progress.
+///
+/// [reuse] does for this pass what it does for [scanDirectory]: a file
+/// the index has already checked, and whose stamp still matches, is not
+/// opened again. A second art pass over an untouched collection then
+/// reads nothing at all.
 Future<ArtScan> scanAlbumArt(
   List<Track> tracks, {
   void Function(int done, int total)? onProgress,
   bool Function()? isCancelled,
+  TrackIndex? reuse,
 }) async {
   final sw = Stopwatch()..start();
   final embedded = <String, String>{};
   final unreadable = <String>[];
   final folders = <String>{};
+  final checked = <String>{};
+  var reusedCount = 0;
+
+  // The index's own view of each track, to compare stamps against. A
+  // file whose stamp has moved on has been rewritten since the art pass
+  // last looked, so whatever it said then is no longer a fact.
+  final previous = reuse?.byPath ?? const <String, Track>{};
+  final previouslyChecked = reuse?.artChecked ?? const <String>{};
+  final previousArt = reuse?.embeddedArt ?? const <String, String>{};
 
   for (var i = 0; i < tracks.length; i++) {
     if (isCancelled?.call() ?? false) break;
@@ -236,6 +346,25 @@ Future<ArtScan> scanAlbumArt(
     folders.add(slash <= 0 ? '' : track.path.substring(0, slash));
 
     if (!track.isReadable) continue;
+
+    // Checked before, and the file has not been written since. The
+    // stamp comparison is the whole safeguard: without it, a file this
+    // app had just embedded a cover into would still be reported as
+    // having none.
+    final before = previous[track.path];
+    if (previouslyChecked.contains(track.path) &&
+        before != null &&
+        track.modifiedMs != 0 &&
+        before.modifiedMs == track.modifiedMs &&
+        before.sizeBytes == track.sizeBytes) {
+      checked.add(track.path);
+      final mime = previousArt[track.path];
+      if (mime != null) embedded[track.path] = mime;
+      reusedCount++;
+      continue;
+    }
+
+    checked.add(track.path);
     try {
       final meta = readMetadata(File(track.path), getImage: true);
       if (meta.pictures.isEmpty) continue;
@@ -287,5 +416,7 @@ Future<ArtScan> scanAlbumArt(
     existingCovers: existingCovers,
     unreadable: unreadable,
     elapsed: sw.elapsed,
+    checked: checked,
+    reusedCount: reusedCount,
   );
 }

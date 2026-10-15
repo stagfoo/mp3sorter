@@ -16,10 +16,12 @@ import 'bitrate.dart';
 import 'cover_art.dart';
 import 'diagnostics.dart';
 import 'duplicates.dart';
+import 'index_store.dart';
 import 'plan.dart';
 import 'recent_folders.dart';
 import 'scanner.dart';
 import 'session_file.dart';
+import 'track_index.dart';
 import 'version.dart';
 import 'track.dart';
 
@@ -106,6 +108,15 @@ class AppState extends ChangeNotifier {
   List<AlbumArt> get albumsNeedingLookup =>
       [for (final a in albums) if (a.needsNetwork) a];
 
+  /// The saved index for the current collection, as it was last known
+  /// to be true. Kept so a rescan can skip what has not changed, and so
+  /// a run can bring it along rather than invalidating it.
+  TrackIndex? index;
+
+  /// What the last scan got for free. Shown, because a scan finishing in
+  /// a second where it used to take minutes looks like it failed.
+  ReuseStats? lastReuse;
+
   Journal? _journal;
 
   Future<Journal> _openJournal() async {
@@ -123,7 +134,26 @@ class AppState extends ChangeNotifier {
   Future<void> forgetFolder(String path) async {
     final store = await RecentFoldersStore.open();
     recentFolders = await store.remove(path);
+    // Its index goes too. Keeping one for a folder nobody is interested
+    // in is a megabyte of cache that will never be read again.
+    await (await IndexStore.open()).forget(path);
     notifyListeners();
+  }
+
+  /// Rescans from scratch, ignoring everything the index remembers.
+  ///
+  /// The escape hatch. Reuse rests on size and modification time being
+  /// a true account of whether a file has changed, which is what `make`
+  /// and `rsync` rest on too — but a filesystem that lies about either,
+  /// or a card restored from a backup that preserved both, would leave
+  /// the index quietly describing files that are not what it thinks.
+  /// This is how to be sure, at the cost of the full scan time.
+  Future<void> forceFullRescan() async {
+    final path = rootPath;
+    if (path == null) return;
+    await (await IndexStore.open()).forget(path);
+    index = null;
+    await scanFolder(path);
   }
 
   Future<void> refreshUndoState() async {
@@ -143,8 +173,15 @@ class AppState extends ChangeNotifier {
     rejected.clear();
     notifyListeners();
 
+    // The index first. Loading it costs one file read and saves
+    // thousands — on an unchanged collection the scan below opens
+    // nothing at all.
+    final indexStore = await IndexStore.open();
+    index = await indexStore.load(path);
+
     final result = await scanDirectory(
       Directory(path),
+      reuse: index,
       onProgress: (done, file) {
         progressDone = done;
         progressLabel = file.split('/').last;
@@ -155,14 +192,28 @@ class AppState extends ChangeNotifier {
     );
 
     scan = result;
+    lastReuse = result.reuse;
     scanIsStale = false;
     lastResult = null;
+
+    // The art the previous index knew is carried over; the stamp check
+    // inside [scanAlbumArt] is what keeps it honest.
+    index = TrackIndex(
+      rootPath: path,
+      scannedAt: DateTime.now(),
+      tracks: result.tracks,
+      embeddedArt: index?.embeddedArt ?? const {},
+      artChecked: index?.artChecked ?? const {},
+      folderImages: index?.folderImages ?? const {},
+      scanSeconds: result.elapsed.inSeconds,
+    );
+    await indexStore.save(index!);
 
     // Recorded after the scan rather than when the folder is picked, so
     // the remembered file count is a real one and a cancelled or failed
     // scan does not leave a misleading entry.
-    final store = await RecentFoldersStore.open();
-    recentFolders = await store.add(path, result.tracks.length);
+    final recents = await RecentFoldersStore.open();
+    recentFolders = await recents.add(path, result.tracks.length);
 
     duplicates = findDuplicates(result.tracks);
     _rebuildPlan();
@@ -276,6 +327,7 @@ class AppState extends ChangeNotifier {
 
     final found = await scanAlbumArt(
       s.tracks,
+      reuse: index,
       onProgress: (done, total) {
         progressDone = done;
         progressTotal = total;
@@ -284,6 +336,23 @@ class AppState extends ChangeNotifier {
     );
 
     artScan = found;
+
+    // Remembered, so a second art pass over an untouched collection
+    // reads nothing — the expensive part of this pass is opening every
+    // embedded image to find out whether there is one.
+    final current = index;
+    if (current != null) {
+      index = TrackIndex(
+        rootPath: current.rootPath,
+        scannedAt: current.scannedAt,
+        tracks: current.tracks,
+        embeddedArt: found.embeddedArt,
+        artChecked: found.checked,
+        folderImages: found.folderImages,
+        scanSeconds: current.scanSeconds,
+      );
+      await (await IndexStore.open()).save(index!);
+    }
     albums = planArtwork(
       s.tracks,
       embeddedArt: found.embeddedArt,
@@ -385,6 +454,11 @@ class AppState extends ChangeNotifier {
     artPlan = const [];
     artIsStale = true;
 
+    // Same as a sorting run: the journal says what was written, so the
+    // index follows along and the next art pass only reads the files
+    // that actually changed.
+    await _absorb(toRun, j);
+
     artBusy = false;
     await refreshUndoState();
     notifyListeners();
@@ -412,15 +486,100 @@ class AppState extends ChangeNotifier {
       },
     );
 
-    // Anything that moved a file invalidates every path in the scan.
-    if ((lastResult?.succeeded ?? 0) > 0 &&
-        (toRun.moves.isNotEmpty || toRun.trashes.isNotEmpty)) {
-      scanIsStale = true;
-    }
+    // The index is brought along rather than thrown away.
+    //
+    // This is what the whole index exists for. A run used to invalidate
+    // every path in the scan, which meant a full rescan before anything
+    // else could be done — and if that rescan was skipped, the next
+    // apply failed on every file, which is exactly the "0 applied, 249
+    // failed" this app spent four versions on. The journal already says
+    // precisely what happened, so the index can simply be edited to
+    // match.
+    await _absorb(toRun, j);
 
     stage = Stage.done;
     await refreshUndoState();
     notifyListeners();
+  }
+
+  /// Folds what a run did into the index, the scan and the plan.
+  ///
+  /// Driven by the journal, not the plan: the plan is what was intended
+  /// and the journal is what happened. On a collection this size those
+  /// differ often enough that reading the plan would quietly put the
+  /// index out of step with the disk, which is worse than having no
+  /// index at all.
+  Future<void> _absorb(Plan applied, Journal journal) async {
+    final current = index;
+    if (current == null) {
+      // No index to update, so fall back to the old behaviour: the scan
+      // describes paths that may have moved.
+      scanIsStale = true;
+      return;
+    }
+
+    final entries = await journal.read();
+    // Only this run's entries. The journal accumulates across runs, and
+    // replaying an earlier run's moves over an index that already
+    // reflects them would move tracks to paths nothing is on.
+    final mine = _entriesFor(entries, applied);
+
+    var next = current.afterJournal(mine, applied: applied);
+
+    // Re-read the stamps of everything that was touched, so those files
+    // are not needlessly re-read on the next scan. Cheap: a `stat` each,
+    // against 3.7ms each to read them again.
+    final store = await IndexStore.open();
+    final touched = <String>{
+      for (final e in mine)
+        if (e.succeeded) e.targetPath ?? e.path,
+    };
+    next = next.withFreshStamps(store.stampsFor(touched));
+
+    index = next;
+    scan = ScanResult(
+      tracks: next.tracks,
+      skipped: scan?.skipped ?? const [],
+      elapsed: scan?.elapsed ?? Duration.zero,
+    );
+    duplicates = findDuplicates(next.tracks);
+    rejected.clear();
+    _rebuildPlan();
+
+    // Not stale: the scan now describes the collection as it actually
+    // is. A failed action left its file exactly where it was — the
+    // applier guarantees that, including undoing a copy whose original
+    // could not be removed — so a failure does not make this untrue.
+    scanIsStale = false;
+
+    await store.save(next);
+  }
+
+  /// The journal entries belonging to one run.
+  ///
+  /// Matched on kind and path against the plan that was applied. Not by
+  /// timestamp: two runs a second apart would be indistinguishable, and
+  /// a device whose clock moved would make the whole idea unsound.
+  static List<JournalEntry> _entriesFor(
+    List<JournalEntry> entries,
+    Plan applied,
+  ) {
+    final wanted = {
+      for (final a in applied.all) '${a.kind.name}:${a.path}',
+    };
+    // From the end backwards, keeping only the most recent entry for
+    // each action, then back into order. A path acted on in an earlier
+    // run as well would otherwise be replayed twice.
+    final seen = <String>{};
+    final out = <JournalEntry>[];
+    for (var i = entries.length - 1; i >= 0; i--) {
+      final e = entries[i];
+      final key = '${e.kind.name}:${e.path}';
+      if (!wanted.contains(key)) continue;
+      if (!seen.add(key)) continue;
+      out.add(e);
+    }
+    return out.reversed.toList();
   }
 
   Future<void> undoEverything() async {
@@ -439,7 +598,10 @@ class AppState extends ChangeNotifier {
       },
     );
 
-    // Undo moves files back, so the scan is stale either way.
+    // Undo puts files back where they came from, which the index cannot
+    // be edited into describing — it would have to be reversed, and the
+    // journal has just been cleared. One rescan, which is now cheap for
+    // everything undo did not touch.
     scanIsStale = true;
     stage = Stage.done;
     await refreshUndoState();
@@ -499,10 +661,22 @@ class AppState extends ChangeNotifier {
       elapsed: Duration(seconds: result.session.scanSeconds),
     );
     duplicates = findDuplicates(result.session.tracks);
+    // The loaded scan doubles as an index, because a saved session
+    // carries each file's size and modification time. That makes the
+    // rescan below cheap for everything that has not changed — which is
+    // strictly better than the old "check the paths still exist" pass,
+    // since it is nearly as fast and actually re-reads what moved.
+    index = TrackIndex(
+      rootPath: result.session.rootPath,
+      scannedAt: result.session.scannedAt,
+      tracks: result.session.tracks,
+      scanSeconds: result.session.scanSeconds,
+    );
+    lastReuse = null;
     _rebuildPlan();
     lastResult = null;
-    // Loaded from disk, so the files may have moved since. Verifying is
-    // one tap and far cheaper than a full rescan.
+    // Loaded from disk, so the files may have moved since. Rescanning
+    // is now the cheap option rather than the expensive one.
     scanIsStale = true;
     stage = Stage.scanned;
     notifyListeners();
@@ -580,7 +754,25 @@ class AppState extends ChangeNotifier {
         scanIsStale: scanIsStale,
         now: DateTime.now(),
         art: _artReport(),
+        index: _indexReport(),
       );
+
+  IndexReport? _indexReport() {
+    final current = index;
+    if (current == null) return null;
+    final reuse = lastReuse;
+    return IndexReport(
+      tracks: current.tracks.length,
+      reused: reuse?.reused ?? 0,
+      read: reuse?.read ?? 0,
+      vanished: reuse?.vanished ?? 0,
+      scannedAt: current.scannedAt,
+      artChecked: current.artChecked.length,
+      withArt: current.embeddedArt.length,
+      withoutStamp:
+          current.tracks.where((t) => t.modifiedMs == 0).length,
+    );
+  }
 
   /// Null when the art pass has never been run, so the report says
   /// nothing rather than reporting zeros that look like findings.

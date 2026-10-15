@@ -32,6 +32,7 @@ String buildBugReport({
   required bool scanIsStale,
   required DateTime now,
   ArtReport? art,
+  IndexReport? index,
 }) {
   final b = StringBuffer();
   void line([String s = '']) => b.writeln(s);
@@ -97,6 +98,24 @@ String buildBugReport({
   final summary = summariseDuplicates(duplicates);
   line('groups ${summary.groups}  removable ${summary.removable}  '
       '${(summary.reclaimableBytes / 1073741824).toStringAsFixed(2)} GB');
+  line();
+
+  line('-- index --');
+  if (index == null) {
+    line('(none — every file was read)');
+  } else {
+    line('tracks held   ${index.tracks}');
+    line('taken from it ${index.reused}');
+    line('read anyway   ${index.read}');
+    line('gone since    ${index.vanished}');
+    line('last scanned  ${index.scannedAt.toIso8601String()}');
+    line('art checked   ${index.artChecked}  with art ${index.withArt}');
+    // The number that explains a wrong answer. Stamps are how the app
+    // decides a file has not changed, and a file with none is read
+    // again — so a large count here means a slow scan, and a count of
+    // zero after a run means the stamp refresh did not happen.
+    line('no stamp      ${index.withoutStamp}');
+  }
   line();
 
   if (art != null) {
@@ -191,6 +210,34 @@ Map<String, int> summariseErrors(List<String> errors) {
   return Map.fromEntries(
     counts.entries.toList()..sort((a, b) => b.value.compareTo(a.value)),
   );
+}
+
+/// The index, as the report needs it.
+///
+/// Here because the commonest way this feature can be wrong is
+/// invisible from the outside: a scan that answered from the index when
+/// it should have read the disk looks exactly like a scan that worked.
+/// These numbers are what distinguish the two.
+class IndexReport {
+  const IndexReport({
+    required this.tracks,
+    required this.reused,
+    required this.read,
+    required this.vanished,
+    required this.scannedAt,
+    required this.artChecked,
+    required this.withArt,
+    required this.withoutStamp,
+  });
+
+  final int tracks;
+  final int reused;
+  final int read;
+  final int vanished;
+  final DateTime scannedAt;
+  final int artChecked;
+  final int withArt;
+  final int withoutStamp;
 }
 
 /// The art pass, as the report needs it.
