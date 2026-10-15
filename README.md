@@ -215,6 +215,37 @@ one problem read as one problem.
 
 It can also be saved beside the music, for when it is too long to paste.
 
+## A failed move must leave nothing behind
+
+`rename` fails across filesystems, and on Android it fails on a removable
+card for reasons of its own, so the copy-and-delete fallback is not
+exotic — on the device that found this it was the normal path.
+
+The version without that guarantee did this:
+
+```dart
+final copied = await source.copy(target);
+await source.delete();     // if this throws, BOTH files now exist
+```
+
+The exception propagated, the action was reported as **failed**, and a
+duplicate was left behind: the original still in place and a copy at the
+destination. The owner saw folders that looked untouched while the app
+insisted the files had been filed, and the duplicate count climbed every
+run — 244 groups of it.
+
+Now the copy is undone before the failure is reported, so a failed move
+changes nothing. The regression test was checked against the old
+implementation to confirm it actually fails there; a test that passes on
+the broken code is decoration.
+
+## What has actually been done
+
+The bug report reads the journal and says how many moves, retags and
+removals have really happened, with sample before/after paths. "Did it
+move my files or not" was not answerable from anything else on screen,
+and guessing at it cost a round of changes.
+
 ## Two notions of "taken"
 
 The bug that reached a device four separate times, each fix revealing the

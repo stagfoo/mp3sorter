@@ -277,23 +277,61 @@ Future<JournalEntry> _applyOne(PlannedAction action) async {
 
 /// Moves a file, falling back to copy-and-delete across filesystems.
 ///
-/// `rename` fails with EXDEV between devices, which is exactly the case
-/// here: a phone moving a file from an SD card to internal storage, or a
-/// desktop between two drives. The copy is verified by length before the
-/// original goes, so a half-copy never costs the source.
+/// `rename` fails with EXDEV between devices, and on Android it can fail
+/// on a removable card for reasons of its own, so the fallback is not
+/// exotic — on the device that found this bug it was the normal path.
+///
+/// **A failed move must leave nothing behind.** The version without that
+/// guarantee copied the file, failed to remove the original, reported the
+/// action as failed, and left a duplicate: the original still in place and
+/// a copy at the destination. On a real collection that produced 244
+/// duplicate groups and a folder the owner could see was untouched while
+/// the app insisted the files had been filed.
+///
+/// So the copy is verified by length, and if the original cannot then be
+/// removed the copy is undone before the failure is reported.
 Future<void> _moveFile(File source, String target) async {
   try {
     await source.rename(target);
     return;
   } on FileSystemException {
-    // Cross-device. Fall through to copy and delete.
+    // Cross-device, or a filesystem that will not rename across
+    // directories. Fall through to copy and delete.
   }
+
   final copied = await source.copy(target);
+
   if (await copied.length() != await source.length()) {
-    await copied.delete();
-    throw FileSystemException('copy was incomplete', target);
+    await _deleteQuietly(copied);
+    throw FileSystemException('the copy came out a different size', target);
   }
-  await source.delete();
+
+  try {
+    await source.delete();
+  } on FileSystemException catch (e) {
+    // The dangerous case. Both files exist right now, and leaving it
+    // that way is how a collection silently doubles.
+    await _deleteQuietly(copied);
+    throw FileSystemException(
+      'copied it, but could not remove the original '
+      '(${e.osError?.message ?? e.message}) — the copy was undone so '
+      'nothing is duplicated',
+      source.path,
+    );
+  }
+}
+
+/// Removes a file, swallowing whatever goes wrong.
+///
+/// Used only when already handling a failure: the error that matters is
+/// the one being reported, and a failure to clean up should not replace
+/// it with a less useful one.
+Future<void> _deleteQuietly(File file) async {
+  try {
+    if (file.existsSync()) await file.delete();
+  } catch (_) {
+    // Nothing useful to do, and the caller is already throwing.
+  }
 }
 
 /// Reverses a journal, newest first.

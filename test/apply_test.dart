@@ -291,6 +291,8 @@ void main() {
     });
   });
 
+  _failedMoveLeavesNothing();
+
   group('the journal format', () {
     test('a truncated final line costs one entry, not the file', () async {
       // What an interrupted run leaves behind. JSON Lines is chosen
@@ -353,5 +355,81 @@ void main() {
       expect(r.succeeded, 0);
       expect(r.failed, 0);
     });
+  });
+}
+
+/// A failed move must leave nothing behind.
+///
+/// The invariant that broke on a device: the copy-and-delete fallback
+/// copied the file, could not remove the original, reported failure —
+/// and left both. The owner saw untouched folders while the app said the
+/// files were filed, and the duplicate count climbed every run.
+void _failedMoveLeavesNothing() {
+  group('a move that fails part-way', () {
+    test('leaves no copy behind when the original cannot be removed',
+        () async {
+      write('locked/song.mp3', 'audio');
+      final sourceDir = Directory(p('locked'));
+      // Removing write permission on the *directory* is what stops a
+      // file inside it being unlinked, which is exactly the shape of the
+      // Android failure.
+      await Process.run('chmod', ['555', sourceDir.path]);
+      addTearDown(() => Process.run('chmod', ['755', sourceDir.path]));
+
+      final r = await applyPlan(
+        planOf(moves: [
+          PlannedAction(
+              kind: ActionKind.move,
+              path: p('locked/song.mp3'),
+              targetPath: p('out/song.mp3')),
+        ]),
+        journalIn(),
+      );
+
+      expect(r.failed, 1, reason: 'it must report the failure');
+      expect(File(p('locked/song.mp3')).existsSync(), isTrue,
+          reason: 'the original is still the only copy');
+      expect(File(p('out/song.mp3')).existsSync(), isFalse,
+          reason: 'the half-made copy must be undone, not left as a '
+              'duplicate');
+    }, skip: Platform.isWindows);
+
+    test('the failure says what actually happened', () async {
+      write('locked2/song.mp3', 'audio');
+      await Process.run('chmod', ['555', p('locked2')]);
+      addTearDown(() => Process.run('chmod', ['755', p('locked2')]));
+
+      final r = await applyPlan(
+        planOf(moves: [
+          PlannedAction(
+              kind: ActionKind.move,
+              path: p('locked2/song.mp3'),
+              targetPath: p('out2/song.mp3')),
+        ]),
+        journalIn(),
+      );
+      expect(r.errors.single, contains('could not remove the original'));
+      expect(r.errors.single, contains('nothing is duplicated'));
+    }, skip: Platform.isWindows);
+
+    test('a journalled failure is not replayed by undo', () async {
+      write('locked3/song.mp3', 'audio');
+      await Process.run('chmod', ['555', p('locked3')]);
+      addTearDown(() => Process.run('chmod', ['755', p('locked3')]));
+
+      final j = journalIn();
+      await applyPlan(
+        planOf(moves: [
+          PlannedAction(
+              kind: ActionKind.move,
+              path: p('locked3/song.mp3'),
+              targetPath: p('out3/song.mp3')),
+        ]),
+        j,
+      );
+      final r = await undo(j);
+      expect(r.failed, 0);
+      expect(File(p('locked3/song.mp3')).existsSync(), isTrue);
+    }, skip: Platform.isWindows);
   });
 }
