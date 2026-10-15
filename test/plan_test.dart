@@ -464,16 +464,46 @@ void main() {
       });
     });
 
-    test('a file may move onto a name another file is vacating', () {
-      // The conservative fix would be to treat every current path as
-      // occupied, which would suffix files needlessly on a reorganise.
+    test('a name another file still occupies is never targeted', () {
+      // The deliberate trade. A takes B's name and B is leaving, so in
+      // principle A could have it — but whether B leaves depends on
+      // decisions not yet made, and the version that assumed it would
+      // planned moves onto files that never moved. Four times.
+      //
+      // So A is suffixed instead and settles on the next run. A tidier
+      // that takes two passes is better than one that fails.
+      const opts = PlanOptions(root: '/music/_sorted');
       final p = buildPlan([
         t('/music/_sorted/A/One.mp3', artist: 'A', title: 'Two'),
         t('/music/_sorted/A/Two.mp3', artist: 'A', title: 'Three'),
-      ], const PlanOptions(root: '/music/_sorted'));
+      ], opts);
+
+      expect(validatePlan(p), isEmpty);
       final targets = p.moves.map((m) => m.targetPath).toList();
-      expect(targets, contains('/music/_sorted/A/Two.mp3'));
-      expect(targets.every((x) => !x!.contains('(2)')), isTrue);
+      expect(targets, isNot(contains('/music/_sorted/A/Two.mp3')),
+          reason: 'that file has not left yet');
+      expect(targets, contains('/music/_sorted/A/Three.mp3'));
+    });
+
+    test('and it settles on the following run', () {
+      const opts = PlanOptions(root: '/music/_sorted');
+      var tracks = [
+        t('/music/_sorted/A/One.mp3', artist: 'A', title: 'Two'),
+        t('/music/_sorted/A/Two.mp3', artist: 'A', title: 'Three'),
+      ];
+      // Two passes, applying each on paper.
+      for (var pass = 0; pass < 2; pass++) {
+        final p = buildPlan(tracks, opts);
+        expect(validatePlan(p), isEmpty);
+        final moved = {for (final m in p.moves) m.path: m.targetPath!};
+        tracks = [
+          for (final x in tracks)
+            moved.containsKey(x.path) ? x.copyWith(path: moved[x.path]) : x,
+        ];
+      }
+      expect(tracks.map((x) => x.path),
+          containsAll(['/music/_sorted/A/Two.mp3',
+                       '/music/_sorted/A/Three.mp3']));
     });
 
     test('an empty collection plans nothing', () {

@@ -134,7 +134,7 @@ class _HomeScreenState extends State<HomeScreen> {
           if (app.canUndo)
             TextButton.icon(
               icon: const Icon(Icons.undo),
-              label: const Text('Undo last run'),
+              label: const Text('Undo all changes'),
               onPressed: _confirmUndo,
             ),
         ],
@@ -249,11 +249,12 @@ class _HomeScreenState extends State<HomeScreen> {
     final yes = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Undo the last run?'),
+        title: const Text('Undo everything?'),
         content: const Text(
-          'Every move, retag and removal from the last run is reversed, '
-          'newest first. Files in the trash folder come back to where '
-          'they were.',
+          'Reverses every change still in the journal, newest first — '
+          'which is every run since the last undo, not only the most '
+          'recent one. Files go back to the exact paths they came from, '
+          'and anything in the trash folder comes back too.',
         ),
         actions: [
           TextButton(

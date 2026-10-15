@@ -215,6 +215,39 @@ one problem read as one problem.
 
 It can also be saved beside the music, for when it is too long to paste.
 
+## Two notions of "taken"
+
+The bug that reached a device four separate times, each fix revealing the
+next layer, and all of it one confusion:
+
+- **assigned** — names the planner has handed to a move
+- **occupied** — names files are sitting on *right now*
+
+A file may be given a name it already occupies; that is how a file stays
+put. It may **not** be given a name another file occupies, even if that
+file looks like it is leaving — whether it leaves depends on decisions
+not yet made.
+
+The version that conflated them did this:
+
+```dart
+claimed.remove(track.path);   // "my own path shouldn't block me"
+```
+
+which removed a claim *another file had already made on that path*. So
+`Megitsune (2).mp3` was assigned `Megitsune (320k).mp3`, then
+`Megitsune (320k).mp3` was processed, cancelled that claim because the
+path was its own, and stayed exactly where it was — leaving a planned
+move pointing at a file that never moved.
+
+The cost of fixing it properly is that a file can no longer take a name
+another file is vacating, so it gets a suffix and settles on the next
+run. **A tidier that takes two passes beats one that fails.**
+
+`validatePlan` now walks the plan the way the applier will and asserts
+every destination is free at the moment its move runs, which catches the
+whole family however a future change reintroduces it.
+
 ## Rename ordering
 
 Moves are ordered so a file never lands on a name that is still occupied

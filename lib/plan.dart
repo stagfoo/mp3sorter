@@ -74,6 +74,7 @@ class Plan {
     required this.unsortable,
     this.stationaryPaths = const {},
     this.blockedMoves = const [],
+    this.occupiedPaths = const {},
   });
 
   final List<PlannedAction> moves;
@@ -104,6 +105,11 @@ class Plan {
   /// Moves that could not be safely ordered because they form a rename
   /// cycle. Shown rather than attempted — see [orderMoves].
   final List<PlannedAction> blockedMoves;
+
+  /// Every path the scan found a file on. Carried so [validatePlan] can
+  /// assert the invariant that failed four times: a move's destination
+  /// must be free when it runs.
+  final Set<String> occupiedPaths;
 
   int get actionCount => moves.length + retags.length + trashes.length;
   bool get isEmpty => actionCount == 0;
@@ -196,8 +202,14 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
     }
   }
 
-  // Claimed target paths, so two tracks cannot be planned onto one name.
+  // Names this planner has handed out. Separate from what is on disk —
+  // see [_disambiguate] for why conflating the two was a bug.
   final claimed = <String>{};
+
+  /// Every path a scanned file currently sits on. Never removed from:
+  /// a file only stops occupying its path once its move has actually
+  /// run, and the planner cannot know the order that will happen in.
+  final occupied = <String>{for (final t in tracks) t.path.toLowerCase()};
 
   /// Tracks that can be filed, with the names to file them under.
   /// Collected in the first pass and assigned targets in the second.
@@ -291,11 +303,7 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
 
     if (target == track.path) continue;
 
-    // A name is free if nothing is staying there and nothing else has
-    // been assigned it. The file's own current path does not count as an
-    // obstacle — it is about to be vacated.
-    claimed.remove(track.path.toLowerCase());
-    target = _disambiguate(target, extension, claimed, track);
+    target = _disambiguate(target, extension, claimed, occupied, track);
     claimed.add(target.toLowerCase());
 
     // Checked again, because disambiguation can hand a file back its own
@@ -317,10 +325,9 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
   }
 
   // Moves are reordered so a file never lands on a name that is still
-  // occupied when its turn comes. See [orderMoves].
-  final occupied = {
-    for (final t in tracks) t.path.toLowerCase(),
-  };
+  // occupied when its turn comes. See [orderMoves]. With the planner no
+  // longer targeting occupied names this should find nothing to do, and
+  // it stays as the backstop that proves it.
   final ordered = orderMoves(moves, occupied);
 
   return Plan(
@@ -331,6 +338,7 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
     unsortable: unsortable,
     stationaryPaths: stationary,
     blockedMoves: ordered.blocked,
+    occupiedPaths: occupied,
   );
 }
 
@@ -424,9 +432,21 @@ OrderedMoves orderMoves(
 
 /// Finds a free name when two tracks want the same one.
 ///
+/// Two separate notions of "taken", and conflating them was a bug that
+/// reached a device four times:
+///
+///  * **[assigned]** — names this planner has already given to a move.
+///  * **[occupied]** — names files are sitting on right now.
+///
+/// A file may be given a name it already occupies; that is how a file
+/// stays put. It may not be given a name *another* file occupies, even
+/// if that file looks like it is leaving — whether it leaves depends on
+/// decisions not yet made, and the version that assumed otherwise
+/// planned moves onto files that never moved.
+///
 /// Compared case-insensitively, because two files differing only in case
-/// coexist on ext4 and collide on the FAT card this collection might end
-/// up on — planning them onto one name would silently lose one.
+/// coexist on ext4 and collide on a FAT card — planning them onto one
+/// name would silently lose one.
 ///
 /// The suffix carries the bitrate rather than a bare counter, because
 /// `Title (128k).mp3` beside `Title.mp3` says what the second copy is,
@@ -434,21 +454,32 @@ OrderedMoves orderMoves(
 String _disambiguate(
   String target,
   String extension,
-  Set<String> claimed,
+  Set<String> assigned,
+  Set<String> occupied,
   Track track,
 ) {
-  if (!claimed.contains(target.toLowerCase())) return target;
+  final own = track.path.toLowerCase();
+
+  bool free(String candidate) {
+    final c = candidate.toLowerCase();
+    if (assigned.contains(c)) return false;
+    // Occupied by somebody else is the hard stop. Occupied by this very
+    // file is not an obstacle to itself.
+    return !occupied.contains(c) || c == own;
+  }
+
+  if (free(target)) return target;
 
   final base = target.substring(0, target.length - extension.length);
 
   if (track.bitrateKbps != null) {
     final withRate = '$base (${track.bitrateKbps}k)$extension';
-    if (!claimed.contains(withRate.toLowerCase())) return withRate;
+    if (free(withRate)) return withRate;
   }
 
   for (var n = 2; n < 1000; n++) {
     final candidate = '$base ($n)$extension';
-    if (!claimed.contains(candidate.toLowerCase())) return candidate;
+    if (free(candidate)) return candidate;
   }
   // A thousand files wanting one name is not a real collection; giving
   // up loudly beats looping.
@@ -516,18 +547,24 @@ List<PlanProblem> validatePlan(Plan plan) {
     }
   }
 
-  // A move aimed at a name something else is keeping. This is the check
-  // that would have caught the 1.0.x planner bug before it reached a
-  // device rather than after.
-  final ontoOccupied = [
-    for (final m in plan.moves)
-      if (plan.stationaryPaths.contains(m.targetPath!.toLowerCase()))
-        m.path,
-  ];
-  if (ontoOccupied.isNotEmpty) {
+  // The invariant that failed four times, checked directly: walk the
+  // plan the way the applier will and confirm every destination is free
+  // at the moment its move runs. This catches the whole family at once,
+  // however a future change manages to reintroduce it.
+  final onDisk = {...plan.occupiedPaths};
+  final collisions = <String>[];
+  for (final m in plan.moves) {
+    final target = m.targetPath!.toLowerCase();
+    if (onDisk.contains(target) && target != m.path.toLowerCase()) {
+      collisions.add('${m.path} -> ${m.targetPath}');
+    }
+    onDisk.remove(m.path.toLowerCase());
+    onDisk.add(target);
+  }
+  if (collisions.isNotEmpty) {
     problems.add(PlanProblem(
-      'would be moved onto a file that is staying put',
-      ontoOccupied,
+      'would land on a file that is still there',
+      collisions,
     ));
   }
 
