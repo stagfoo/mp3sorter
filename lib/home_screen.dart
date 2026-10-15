@@ -642,12 +642,67 @@ class _OptionsCard extends StatelessWidget {
       child: Column(
         children: [
           SwitchListTile(
-            title: const Text('File as Artist/Title'),
+            title: const Text('Reorganise files'),
             subtitle: const Text('Into a _sorted folder, never over the '
                 'originals in place'),
             value: o.renameFiles,
             onChanged: (v) => app.setOptions(PlanOptions(
+                useFolderHints: o.useFolderHints,
+                layout: o.layout,
                 renameFiles: v,
+                writeTags: o.writeTags,
+                cleanQualityTags: o.cleanQualityTags,
+                standardiseArtists: o.standardiseArtists,
+                removeDuplicates: o.removeDuplicates)),
+          ),
+          if (o.renameFiles)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Layout'),
+                  const SizedBox(height: 8),
+                  SegmentedButton<Layout>(
+                    segments: const [
+                      ButtonSegment(
+                          value: Layout.artistAlbumTitle,
+                          label: Text('Artist/Album/Track')),
+                      ButtonSegment(
+                          value: Layout.artistTitle,
+                          label: Text('Artist/Title')),
+                    ],
+                    selected: {o.layout},
+                    onSelectionChanged: (sel) => app.setOptions(PlanOptions(
+                        useFolderHints: o.useFolderHints,
+                        layout: sel.first,
+                        renameFiles: o.renameFiles,
+                        writeTags: o.writeTags,
+                        cleanQualityTags: o.cleanQualityTags,
+                        standardiseArtists: o.standardiseArtists,
+                        removeDuplicates: o.removeDuplicates)),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'A file with no album tag goes straight under the '
+                    'artist. The folder a file is in now is never used '
+                    'to guess — it is not a promise about what is '
+                    'inside it.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+          SwitchListTile(
+            title: const Text('Use folder names when tags are missing'),
+            subtitle: const Text('The folder above a file is read as the '
+                'album and the one above that as the artist. Marked in '
+                'the review as a guess.'),
+            value: o.useFolderHints,
+            onChanged: (v) => app.setOptions(PlanOptions(
+                useFolderHints: v,
+                layout: o.layout,
+                renameFiles: o.renameFiles,
                 writeTags: o.writeTags,
                 cleanQualityTags: o.cleanQualityTags,
                 standardiseArtists: o.standardiseArtists,
@@ -657,6 +712,8 @@ class _OptionsCard extends StatelessWidget {
             title: const Text('Write tags'),
             value: o.writeTags,
             onChanged: (v) => app.setOptions(PlanOptions(
+                useFolderHints: o.useFolderHints,
+                layout: o.layout,
                 renameFiles: o.renameFiles,
                 writeTags: v,
                 cleanQualityTags: o.cleanQualityTags,
@@ -670,6 +727,8 @@ class _OptionsCard extends StatelessWidget {
                 'never stored.'),
             value: o.cleanQualityTags,
             onChanged: (v) => app.setOptions(PlanOptions(
+                useFolderHints: o.useFolderHints,
+                layout: o.layout,
                 renameFiles: o.renameFiles,
                 writeTags: o.writeTags,
                 cleanQualityTags: v,
@@ -682,6 +741,8 @@ class _OptionsCard extends StatelessWidget {
                 'collection'),
             value: o.standardiseArtists,
             onChanged: (v) => app.setOptions(PlanOptions(
+                useFolderHints: o.useFolderHints,
+                layout: o.layout,
                 renameFiles: o.renameFiles,
                 writeTags: o.writeTags,
                 cleanQualityTags: o.cleanQualityTags,
@@ -693,6 +754,8 @@ class _OptionsCard extends StatelessWidget {
             subtitle: const Text('Moved to a trash folder, never deleted'),
             value: o.removeDuplicates,
             onChanged: (v) => app.setOptions(PlanOptions(
+                useFolderHints: o.useFolderHints,
+                layout: o.layout,
                 renameFiles: o.renameFiles,
                 writeTags: o.writeTags,
                 cleanQualityTags: o.cleanQualityTags,

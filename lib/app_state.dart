@@ -145,6 +145,9 @@ class AppState extends ChangeNotifier {
         // the target has to be somewhere the person can find, and
         // writing outside the folder they chose would be a surprise.
         root: '$root/${options.renameFiles ? "_sorted" : ""}',
+        sourceRoot: root,
+        layout: options.layout,
+        useFolderHints: options.useFolderHints,
         renameFiles: options.renameFiles,
         writeTags: options.writeTags,
         cleanQualityTags: options.cleanQualityTags,

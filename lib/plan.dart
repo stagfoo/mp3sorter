@@ -14,6 +14,7 @@ library;
 
 import 'bitrate.dart';
 import 'duplicates.dart';
+import 'levenshtein.dart';
 import 'track.dart';
 
 /// What kind of change one action makes.
@@ -117,10 +118,25 @@ class Plan {
   List<PlannedAction> get all => [...moves, ...retags, ...trashes];
 }
 
+/// Where a tidied file ends up.
+enum Layout {
+  /// `Artist/Title.mp3`. Flat per artist — fine for singles and loose
+  /// tracks, and it merges albums together.
+  artistTitle,
+
+  /// `Artist/Album/01 Title.mp3`. Keeps albums apart and restores track
+  /// order, which is also what stops two songs of the same name on
+  /// different records fighting over one filename.
+  artistAlbumTitle,
+}
+
 /// How the planner should behave.
 class PlanOptions {
   const PlanOptions({
     this.root = '',
+    this.sourceRoot = '',
+    this.layout = Layout.artistAlbumTitle,
+    this.useFolderHints = true,
     this.renameFiles = true,
     this.writeTags = true,
     this.cleanQualityTags = true,
@@ -129,8 +145,19 @@ class PlanOptions {
     this.trashDirName = '.mp3sorter-trash',
   });
 
-  /// Where tidied files are filed, as `root/Artist/Title.mp3`.
+  /// Where tidied files are filed, under [layout].
   final String root;
+
+  /// The folder that was scanned. Needed to work out which folders above
+  /// a file are its own rather than part of the path to the collection.
+  final String sourceRoot;
+
+  final Layout layout;
+
+  /// Fall back to the folder structure when a tag is missing. The
+  /// immediate parent is read as the album and the one above it as the
+  /// artist — see [folderHints] for why it refuses to go further.
+  final bool useFolderHints;
 
   final bool renameFiles;
   final bool writeTags;
@@ -213,7 +240,7 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
 
   /// Tracks that can be filed, with the names to file them under.
   /// Collected in the first pass and assigned targets in the second.
-  final wanted = <(Track, String, String, bool)>[];
+  final wanted = <(Track, String, String, String?, bool, bool)>[];
 
   for (final track in tracks) {
     if (doomed.contains(track.path)) continue;
@@ -223,10 +250,22 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
     }
 
     final names = inferNames(track);
-    final rawArtist = names.artist;
+    final hints = options.useFolderHints
+        ? folderHints(track.path, options.sourceRoot)
+        : const FolderHints();
+
+    // Tags first, then the filename, then the folders. Each step is a
+    // weaker claim than the one before it, so the order matters.
+    final rawArtist = names.artist ?? hints.artist;
     final artist =
         rawArtist == null ? null : (canonical[rawArtist] ?? rawArtist);
     final title = names.title;
+    final album = track.album?.trim().isNotEmpty == true
+        ? track.album!.trim()
+        : hints.album;
+    final guessedFromFolder =
+        (names.artist == null && hints.artist != null) ||
+            (track.album?.trim().isNotEmpty != true && hints.album != null);
 
     // ---- tags -------------------------------------------------------
     if (options.writeTags) {
@@ -269,9 +308,54 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
         // the original filename.
         unsortable.add(track);
       } else {
-        wanted.add((track, artist, title, names.fromTags));
+        wanted.add(
+            (track, artist, title, album, names.fromTags, guessedFromFolder));
       }
     }
+  }
+
+  /// Where a track belongs, under the chosen layout.
+  ///
+  /// The album folder is used only when the file actually carries an
+  /// album tag. A file with none goes straight under the artist rather
+  /// than into an invented `Unknown Album` — a folder named after
+  /// missing information is worse than no folder, because it looks like
+  /// a real album until you open it.
+  ///
+  /// The folder a file currently sits in is deliberately not consulted.
+  /// `[2005] Wolfmother` plainly says who the artist is, but reading it
+  /// would mean guessing from something nobody promised was accurate,
+  /// and a wrong guess files a track under an artist that does not
+  /// exist.
+  String targetFor(Track track, String artist, String title, String? album) {
+    final extension = _extensionOf(track.path);
+    final safeTitle = safeComponent(title);
+
+    // A single, where the album is named after its one track, gets no
+    // album folder: `Creepy Nuts/Bling-Bang-Bang-Born/Bling-Bang-Bang-Born.mp3`
+    // is a directory that exists to hold a file of the same name.
+    // Compared after normalisation, since the two spellings rarely match
+    // character for character.
+    final albumIsTheTitle = album != null &&
+        normaliseForMatching(album) == normaliseForMatching(title);
+
+    if (options.layout == Layout.artistTitle ||
+        album == null ||
+        album.isEmpty ||
+        albumIsTheTitle) {
+      return '${options.root}/${safeComponent(artist)}/$safeTitle$extension';
+    }
+
+    // Zero-padded so a plain alphabetical listing is in album order,
+    // which is the only reason the number is in the name at all.
+    // The tag first, then whatever the filename was carrying.
+    final number = track.trackNumber ?? inferNames(track).trackNumber;
+    final prefix = number == null || number <= 0
+        ? ''
+        : '${number.toString().padLeft(2, '0')} ';
+
+    return '${options.root}/${safeComponent(artist)}/'
+        '${safeComponent(album)}/$prefix$safeTitle$extension';
   }
 
   // ---- filing, pass two ----------------------------------------------
@@ -289,17 +373,16 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
   for (final t in unsortable) {
     stationary.add(t.path.toLowerCase());
   }
-  for (final (track, artist, title, _) in wanted) {
-    final target = '${options.root}/${safeComponent(artist)}/'
-        '${safeComponent(title)}${_extensionOf(track.path)}';
-    if (target == track.path) stationary.add(target.toLowerCase());
+  for (final (track, artist, title, album, _, _) in wanted) {
+    if (targetFor(track, artist, title, album) == track.path) {
+      stationary.add(track.path.toLowerCase());
+    }
   }
   claimed.addAll(stationary);
 
-  for (final (track, artist, title, fromTags) in wanted) {
+  for (final (track, artist, title, album, fromTags, fromFolder) in wanted) {
     final extension = _extensionOf(track.path);
-    var target = '${options.root}/${safeComponent(artist)}/'
-        '${safeComponent(title)}$extension';
+    var target = targetFor(track, artist, title, album);
 
     if (target == track.path) continue;
 
@@ -318,9 +401,13 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
       kind: ActionKind.move,
       path: track.path,
       targetPath: target,
-      reason: fromTags
-          ? 'from tags'
-          : 'from the filename — tags were missing',
+      reason: fromFolder
+          // Flagged, because this is the weakest of the three sources
+          // and the one most worth a glance before it is acted on.
+          ? 'from the folder name — check this one'
+          : fromTags
+              ? 'from tags'
+              : 'from the filename — tags were missing',
     ));
   }
 

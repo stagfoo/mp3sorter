@@ -59,8 +59,12 @@ void main(List<String> args) async {
   }
 
   print('\n── plan ──');
-  final plan = buildPlan(scan.tracks,
-      PlanOptions(root: '${root.path}/_sorted', removeDuplicates: false));
+  final plan = buildPlan(
+      scan.tracks,
+      PlanOptions(
+          root: '${root.path}/_sorted',
+          sourceRoot: root.path,
+          removeDuplicates: false));
   print('  moves      ${plan.moves.length}');
   print('  retags     ${plan.retags.length}');
   print('  unsortable ${plan.unsortable.length}');
@@ -78,8 +82,12 @@ void main(List<String> args) async {
     for (final t in scan.tracks)
       movedBy.containsKey(t.path) ? t.copyWith(path: movedBy[t.path]) : t,
   ];
-  final second = buildPlan(after,
-      PlanOptions(root: '${root.path}/_sorted', removeDuplicates: false));
+  final second = buildPlan(
+      after,
+      PlanOptions(
+          root: '${root.path}/_sorted',
+          sourceRoot: root.path,
+          removeDuplicates: false));
   print('  second pass: ${second.moves.length} moves, '
       '${second.retags.length} retags  '
       '${second.moves.isEmpty ? "(converged)" : "!! DOES NOT CONVERGE"}');

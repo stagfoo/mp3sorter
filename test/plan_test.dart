@@ -512,6 +512,7 @@ void main() {
   });
 
   _orderingTests();
+  _layoutTests();
 
   group('validating a plan before it runs', () {
     test('a clean plan has no problems', () {
@@ -692,6 +693,229 @@ void _orderingTests() {
         onDisk.remove(m.path.toLowerCase());
         onDisk.add(m.targetPath!.toLowerCase());
       }
+    });
+  });
+}
+
+/// Album layout and reading the folders.
+void _layoutTests() {
+  Track full(String path,
+          {String? artist, String? title, String? album, int? number}) =>
+      Track(
+          path: path, sizeBytes: 1000, artist: artist, title: title,
+          album: album, trackNumber: number, bitrateKbps: 192,
+          duration: const Duration(minutes: 3));
+
+  const root = '/M';
+  const opts = PlanOptions(root: '/M/_sorted', sourceRoot: root);
+
+  group('Artist/Album/Track layout', () {
+    test('a fully tagged track keeps its album and track number', () {
+      final p = buildPlan([
+        full('$root/x.mp3',
+            artist: 'Wolfmother', title: 'Woman', album: 'Wolfmother',
+            number: 2),
+      ], opts);
+      expect(p.moves.single.targetPath,
+          '/M/_sorted/Wolfmother/Wolfmother/02 Woman.mp3');
+    });
+
+    test('the number is zero-padded so a listing is in album order', () {
+      final p = buildPlan([
+        full('$root/x.mp3',
+            artist: 'A', title: 'T', album: 'B', number: 7),
+      ], opts);
+      expect(p.moves.single.targetPath, contains('/07 T.mp3'));
+    });
+
+    test('no track number means no prefix, not a zero', () {
+      final p = buildPlan(
+          [full('$root/x.mp3', artist: 'A', title: 'T', album: 'B')], opts);
+      expect(p.moves.single.targetPath, '/M/_sorted/A/B/T.mp3');
+    });
+
+    test('no album means straight under the artist', () {
+      // Rather than an invented "Unknown Album", which looks like a real
+      // album until you open it.
+      final p = buildPlan(
+          [full('$root/x.mp3', artist: 'A', title: 'T')], opts);
+      expect(p.moves.single.targetPath, '/M/_sorted/A/T.mp3');
+    });
+
+    test('the same title on two albums no longer collides', () {
+      // The reason the flat layout was a problem: these fought over one
+      // name and one got a meaningless bitrate suffix.
+      final p = buildPlan([
+        full('$root/a.mp3',
+            artist: 'Wolfmother', title: 'Love Train',
+            album: 'Wolfmother', number: 10),
+        full('$root/b.mp3',
+            artist: 'Wolfmother', title: 'Love Train', album: 'Live',
+            number: 4),
+      ], opts);
+      final targets = p.moves.map((m) => m.targetPath).toList();
+      expect(targets, contains('/M/_sorted/Wolfmother/Wolfmother/10 Love Train.mp3'));
+      expect(targets, contains('/M/_sorted/Wolfmother/Live/04 Love Train.mp3'));
+      expect(targets.any((x) => x!.contains('(192k)')), isFalse);
+    });
+
+    test('a single does not get a folder named after its own track', () {
+      // 135 of these in a real collection: an album folder whose only
+      // purpose is to hold one file of the same name.
+      final p = buildPlan([
+        full('$root/x.mp3',
+            artist: 'Creepy Nuts',
+            title: 'Bling-Bang-Bang-Born',
+            album: 'Bling-Bang-Bang-Born'),
+      ], opts);
+      expect(p.moves.single.targetPath,
+          '/M/_sorted/Creepy Nuts/Bling-Bang-Bang-Born.mp3');
+    });
+
+    test('the match allows for spelling differences', () {
+      final p = buildPlan([
+        full('$root/x.mp3',
+            artist: 'A', title: 'Otonoke', album: 'Otonoke (Single)'),
+      ], opts);
+      expect(p.moves.single.targetPath, '/M/_sorted/A/Otonoke.mp3');
+    });
+
+    test('a real album sharing a name with one of its tracks keeps it',
+        () {
+      // Self-titled tracks on self-titled albums are common and the
+      // folder is doing real work when other tracks live in it.
+      final p = buildPlan([
+        full('$root/a.mp3',
+            artist: 'Wolfmother', title: 'Woman',
+            album: 'Wolfmother', number: 2),
+        full('$root/b.mp3',
+            artist: 'Wolfmother', title: 'Wolfmother',
+            album: 'Wolfmother', number: 5),
+      ], opts);
+      final targets = p.moves.map((m) => m.targetPath).toList();
+      expect(targets,
+          contains('/M/_sorted/Wolfmother/Wolfmother/02 Woman.mp3'));
+      // The self-titled track collapses out of the folder, which is the
+      // documented trade: the rule looks at one file at a time.
+      expect(targets, contains('/M/_sorted/Wolfmother/Wolfmother.mp3'));
+    });
+
+    test('the flat layout is still available', () {
+      final p = buildPlan([
+        full('$root/x.mp3',
+            artist: 'A', title: 'T', album: 'B', number: 3),
+      ], const PlanOptions(
+          root: '/M/_sorted', sourceRoot: root, layout: Layout.artistTitle));
+      expect(p.moves.single.targetPath, '/M/_sorted/A/T.mp3');
+    });
+  });
+
+  group('reading the folders', () {
+    test('artist and album come from Artist/Album/Track', () {
+      final h = folderHints('/M/lana-del-rey/2019_norman_218434/03.mp3', '/M');
+      expect(h.artist, 'lana del rey');
+      expect(h.album, 'norman');
+    });
+
+    test('a year prefix is stripped from the album', () {
+      expect(folderHints('/M/Wolfmother/[2009] Cosmic Egg/01.mp3', '/M').album,
+          'Cosmic Egg');
+      expect(folderHints('/M/W/(2005) Wolfmother/01.mp3', '/M').album,
+          'Wolfmother');
+      expect(folderHints('/M/W/2005 - Wolfmother/01.mp3', '/M').album,
+          'Wolfmother');
+    });
+
+    test('a single folder is the album, and gives no artist', () {
+      // The trap this exists to avoid: /Music/[2009] Cosmic Egg is an
+      // album sitting at the top level, and reading it as the artist
+      // would file the record under a band called Cosmic Egg.
+      final h = folderHints('/M/[2009] Cosmic Egg/01.mp3', '/M');
+      expect(h.album, 'Cosmic Egg');
+      expect(h.artist, isNull);
+    });
+
+    test('a file loose in the root gives nothing', () {
+      expect(folderHints('/M/song.mp3', '/M').isEmpty, isTrue);
+    });
+
+    test('a path outside the root gives nothing', () {
+      expect(folderHints('/other/a/b.mp3', '/M').isEmpty, isTrue);
+    });
+
+    test('a trailing slash on the root is tolerated', () {
+      expect(folderHints('/M/A/B/c.mp3', '/M/').artist, 'A');
+    });
+  });
+
+  group('folder hints in a plan', () {
+    test('an untagged file in Artist/Album is filed and flagged', () {
+      // Everything here comes from somewhere other than a tag: artist
+      // and album from the folders, title and track number from the
+      // filename. The leading 05 is kept as the track number rather
+      // than discarded, so the name round-trips.
+      final p = buildPlan([
+        full('$root/Wolfmother/[2005] Wolfmother/05 Where Eagles.mp3'),
+      ], opts);
+      expect(p.moves.single.targetPath,
+          '/M/_sorted/Wolfmother/Wolfmother/05 Where Eagles.mp3');
+      expect(p.moves.single.reason, contains('check this'));
+    });
+
+    test('a number on the front of a filename becomes the track number',
+        () {
+      expect(inferNames(full('/M/A/B/07 Song.mp3')).trackNumber, 7);
+      expect(inferNames(full('/M/A/B/07 - Song.mp3')).trackNumber, 7);
+      expect(inferNames(full('/M/A/B/07. Song.mp3')).trackNumber, 7);
+      expect(inferNames(full('/M/A/B/07_Song.mp3')).trackNumber, 7);
+      expect(inferNames(full('/M/A/B/07 Song.mp3')).title, 'Song');
+    });
+
+    test('a filename that is only a number keeps it as the title', () {
+      // "1979.mp3" is a song, not track 1979 of nothing.
+      final n = inferNames(full('/M/A/B/1979.mp3'));
+      expect(n.title, '1979');
+      expect(n.trackNumber, isNull);
+    });
+
+    test('a title starting with digits round-trips unharmed', () {
+      // "99 Problems" is read as track 99 of "Problems", which is wrong
+      // — and costs nothing, because it is written back out under the
+      // name it arrived with.
+      final p = buildPlan([
+        full('$root/Jay-Z/The Black Album/99 Problems.mp3'),
+      ], opts);
+      expect(p.moves.single.targetPath,
+          endsWith('/99 Problems.mp3'));
+    });
+
+    test('an untagged file one level down stays unsortable', () {
+      // Exactly the user's layout. There is no artist folder to read, so
+      // the file is left alone rather than filed under its album name.
+      final p = buildPlan([
+        full('$root/[2009] Cosmic Egg/01 Cosmic Egg.mp3'),
+      ], opts);
+      expect(p.moves, isEmpty);
+      expect(p.unsortable, hasLength(1));
+    });
+
+    test('a tag always beats the folder', () {
+      final p = buildPlan([
+        full('$root/WrongFolder/AlsoWrong/x.mp3',
+            artist: 'Real Artist', title: 'Real Title',
+            album: 'Real Album'),
+      ], opts);
+      expect(p.moves.single.targetPath,
+          '/M/_sorted/Real Artist/Real Album/Real Title.mp3');
+    });
+
+    test('hints can be turned off', () {
+      final p = buildPlan([
+        full('$root/Wolfmother/[2005] Wolfmother/05 Where Eagles.mp3'),
+      ], const PlanOptions(
+          root: '/M/_sorted', sourceRoot: root, useFolderHints: false));
+      expect(p.moves, isEmpty);
+      expect(p.unsortable, hasLength(1));
     });
   });
 }

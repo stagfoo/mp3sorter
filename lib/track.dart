@@ -169,10 +169,23 @@ class InferredNames {
     required this.artist,
     required this.title,
     required this.fromTags,
+    this.trackNumber,
   });
 
   final String? artist;
   final String? title;
+
+  /// A track number read off the front of the filename, when the tags
+  /// had none.
+  ///
+  /// Captured rather than discarded, which matters more than it looks.
+  /// `05 Where Eagles Have Been.mp3` is a numbered track, and throwing
+  /// the number away loses the album order the filename was carrying.
+  /// It also makes the rule safe on a title that genuinely starts with
+  /// digits: `99 Problems.mp3` is read as number 99 of "Problems" and
+  /// written back out as `99 Problems.mp3` — the same name it came in
+  /// with, so a wrong guess costs nothing.
+  final int? trackNumber;
 
   /// Whether this came from the tags. A filename guess is worth showing
   /// differently, because it is a guess.
@@ -181,6 +194,15 @@ class InferredNames {
   bool get isComplete =>
       (artist?.isNotEmpty ?? false) && (title?.isNotEmpty ?? false);
 }
+
+/// A leading track number, as filenames carry it: `01 `, `01. `,
+/// `01 - `, `01_`.
+///
+/// The separator is optional but *something* must follow the digits, so
+/// a filename that is only a number — `1979.mp3` — is left alone rather
+/// than losing its title.
+final RegExp _filenameTrackNumber =
+    RegExp(r'^\s*(\d{1,3})\s*(?:[-._)]\s*|\s+)');
 
 /// Separators a filename uses between artist and title, commonest first.
 final List<RegExp> _artistTitleSplits = [
@@ -207,9 +229,14 @@ InferredNames inferNames(Track track) {
   }
 
   var stem = track.stem;
-  // Strip a leading track number before splitting, or "01 - Artist - Title"
-  // parses as artist "01".
-  stem = stem.replaceFirst(RegExp(r'^\s*\d{1,3}\s*[-._)]\s*'), '').trim();
+  // Taken off before splitting, or "01 - Artist - Title" parses as an
+  // artist called "01".
+  int? numberFromName;
+  final numbered = _filenameTrackNumber.firstMatch(stem);
+  if (numbered != null) {
+    numberFromName = int.tryParse(numbered.group(1)!);
+    stem = stem.substring(numbered.end).trim();
+  }
 
   for (final sep in _artistTitleSplits) {
     final parts = stem.split(sep);
@@ -222,6 +249,7 @@ InferredNames inferNames(Track track) {
           artist: taggedArtist?.isNotEmpty == true ? taggedArtist : artist,
           title: taggedTitle?.isNotEmpty == true ? taggedTitle : title,
           fromTags: false,
+          trackNumber: numberFromName,
         );
       }
     }
@@ -236,6 +264,7 @@ InferredNames inferNames(Track track) {
         ? taggedTitle
         : (guessTitle.isEmpty ? null : guessTitle),
     fromTags: false,
+    trackNumber: numberFromName,
   );
 }
 
@@ -249,6 +278,77 @@ String _tidy(String s) => s
     .replaceAll('_', ' ')
     .replaceAll(RegExp(r'\s+'), ' ')
     .trim();
+
+/// What the folders a file sits in suggest about it.
+///
+/// Read *structurally*, not by guessing which word looks like a band.
+/// The immediate parent is taken as the album and the one above it as
+/// the artist, which is the `Artist/Album/Track` shape most collections
+/// are already in.
+///
+/// That restraint is the whole point. A file at
+/// `Music/[2009] Cosmic Egg/01 Cosmic Egg.mp3` has exactly one folder
+/// above it, so this reports an album and **no artist** — because the
+/// folder is the album, and reading it as the artist would file the
+/// record under a band called Cosmic Egg. A hint that is sometimes
+/// wrong is worse than no hint: it is wrong silently.
+class FolderHints {
+  const FolderHints({this.artist, this.album});
+
+  final String? artist;
+  final String? album;
+
+  bool get isEmpty => artist == null && album == null;
+}
+
+/// A year carried in the folder name — `[2005] `, `(2005) `, `2005_`,
+/// `2005 - ` — which is about the release, not its name.
+final RegExp _leadingYear =
+    RegExp(r'^\s*[\[\(]?\s*(19|20)\d{2}\s*[\]\)]?\s*[-_.]?\s*');
+
+/// A trailing release or catalogue number, as rippers append:
+/// `2019_norman-fucking-rockwell_218434`.
+final RegExp _trailingId = RegExp(r'[_-]\d{4,}$');
+
+/// Tidies a folder name into something worth putting in a tag.
+String _cleanFolderName(String raw) {
+  var s = raw.replaceFirst(_leadingYear, '');
+  s = s.replaceFirst(_trailingId, '');
+  s = _tidy(s.replaceAll('-', ' '));
+  return s;
+}
+
+/// Reads the folders between [sourceRoot] and the file.
+///
+/// Returns nothing useful when the file sits directly in the root: there
+/// is no folder to read, and inventing one would be worse than leaving
+/// the file alone.
+FolderHints folderHints(String path, String sourceRoot) {
+  var root = sourceRoot.trim();
+  while (root.length > 1 && root.endsWith('/')) {
+    root = root.substring(0, root.length - 1);
+  }
+  if (root.isEmpty || !path.startsWith('$root/')) {
+    return const FolderHints();
+  }
+
+  final relative = path.substring(root.length + 1);
+  final parts = relative.split('/');
+  // The last part is the filename; everything before it is folders.
+  final folders = parts.sublist(0, parts.length - 1);
+  if (folders.isEmpty) return const FolderHints();
+
+  final album = _cleanFolderName(folders.last);
+  // Only when there is a folder above the album one. A single folder is
+  // the album; treating it as the artist is the mistake this guards.
+  final artist =
+      folders.length >= 2 ? _cleanFolderName(folders[folders.length - 2]) : null;
+
+  return FolderHints(
+    artist: (artist == null || artist.isEmpty) ? null : artist,
+    album: album.isEmpty ? null : album,
+  );
+}
 
 /// Characters no filesystem should be asked to hold.
 ///

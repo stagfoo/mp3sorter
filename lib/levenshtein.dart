@@ -146,6 +146,9 @@ final RegExp _releaseNoise = RegExp(
   r'remaster(ed)?|re-?master(ed)?|'
   r'\d{4}\s+remaster(ed)?|remaster(ed)?\s+\d{4}|'
   r'deluxe|deluxe\s+edition|expanded|expanded\s+edition|'
+  // Release formats. Bracketed only, so a song actually called
+  // "Single" is untouched.
+  r'single|ep|lp|maxi\s+single|digital\s+single|'
   r'bonus\s+track|bonus|explicit|clean|'
   r'album\s+version|single\s+version|radio\s+edit|radio\s+version|'
   r'original\s+mix|extended\s+mix|'

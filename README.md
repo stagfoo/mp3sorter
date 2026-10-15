@@ -215,6 +215,41 @@ one problem read as one problem.
 
 It can also be saved beside the music, for when it is too long to paste.
 
+## Where a file ends up
+
+Default layout is `Artist/Album/01 Title.mp3`. The flat `Artist/Title.mp3`
+is still available.
+
+Three sources, each a weaker claim than the one before:
+
+1. **Tags.** Artist, title, album, track number.
+2. **The filename.** `Artist - Title.mp3`, and a leading number is read
+   as the track number rather than discarded — `05 Where Eagles Have
+   Been.mp3` is track 5, so the name round-trips. A filename that is only
+   a number (`1979.mp3`) keeps it as the title.
+3. **The folders.** The immediate parent is the album, the one above it
+   the artist. Marked in the review as *"from the folder name — check
+   this one"*, because it is a guess.
+
+The folder rule is deliberately structural rather than clever. A file at
+`Music/[2009] Cosmic Egg/01 Cosmic Egg.mp3` has one folder above it, so
+it yields an album and **no artist** — the folder is the album, and
+reading it as the artist would file the record under a band called Cosmic
+Egg. A hint that is sometimes wrong is worse than no hint, because it is
+wrong silently. Those files stay unsortable and are reported.
+
+Year prefixes (`[2005] `, `(2005) `, `2005 - `) and trailing catalogue
+numbers (`2019_norman-fucking-rockwell_218434`) are stripped.
+
+**A single gets no album folder.** When the album is named after its one
+track, `Creepy Nuts/Bling-Bang-Bang-Born/Bling-Bang-Bang-Born.mp3` is a
+directory whose only job is to hold a file of the same name — 135 of
+those in a real collection. Compared after normalisation, so
+`Otonoke (Single)` counts as matching `Otonoke`.
+
+On the real collection this files 5,114 of 5,303 and converges on a
+second pass.
+
 ## A failed move must leave nothing behind
 
 `rename` fails across filesystems, and on Android it fails on a removable
