@@ -20,6 +20,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'app_state.dart';
+import 'levenshtein.dart';
 import 'plan.dart';
 import 'shelf.dart';
 import 'sleeve_art.dart';
@@ -63,6 +64,267 @@ int _toCheck(Iterable<PlannedAction> actions) =>
 String _plural(int n, String one, [String? many]) =>
     '$n ${n == 1 ? one : (many ?? '${one}s')}';
 
+/// Which half of the plan a crate is showing — moves or tag writes.
+typedef PlanPart = List<PlannedAction> Function(Plan plan);
+
+List<PlannedAction>? _shelvedFrom;
+List<ArtistShelf> _shelvedCache = const [];
+
+/// The artists in [part] of the current plan, reshelved only when the
+/// plan has actually been rebuilt.
+List<ArtistShelf> _liveShelves(AppState app, PlanPart part) {
+  final actions = part(app.plan!);
+  if (!identical(actions, _shelvedFrom)) {
+    _shelvedFrom = actions;
+    _shelvedCache = shelve(actions);
+  }
+  return _shelvedCache;
+}
+
+/// Credits filed into [artist]'s folder from elsewhere.
+List<String> _filedInto(AppState app, String? artist) =>
+    artist == null ? const [] : app.plan?.filedUnder[artist] ?? const [];
+
+/// Moves everything credited to [artist] into another artist's folder,
+/// chosen from a list. Returns whether anything changed, so the screen
+/// that asked can close — the artist it was showing has gone.
+Future<bool> _fileUnder(BuildContext context, AppState app, SleeveArt art,
+    PlanPart part, String artist) async {
+  final others = [
+    for (final s in _liveShelves(app, part))
+      if (s.name != null && s.name != artist) s,
+  ];
+  final chosen = await showModalBottomSheet<String>(
+    context: context,
+    isScrollControlled: true,
+    showDragHandle: true,
+    useSafeArea: true,
+    builder: (_) => _ArtistPicker(artist: artist, others: others, art: art),
+  );
+  if (chosen == null || !context.mounted) return false;
+
+  final key = normaliseForMatching(artist);
+  final before = app.fileUnder[key];
+  app.fileArtistUnder(artist, chosen);
+  HapticFeedback.mediumImpact();
+  final messenger = ScaffoldMessenger.of(context);
+  messenger.hideCurrentSnackBar();
+  messenger.showSnackBar(SnackBar(
+    content: Text('$artist filed under $chosen'),
+    action: SnackBarAction(
+      label: 'Undo',
+      onPressed: () => before == null
+          ? app.forgetFiling(artist)
+          : app.fileArtistUnder(artist, before),
+    ),
+  ));
+  return true;
+}
+
+/// Takes a credit back out of the folder it was filed into.
+void _keepSeparate(BuildContext context, AppState app, String credit) {
+  final key = normaliseForMatching(credit);
+  final before = app.fileUnder[key];
+  app.fileArtistUnder(credit, credit);
+  final messenger = ScaffoldMessenger.of(context);
+  messenger.hideCurrentSnackBar();
+  messenger.showSnackBar(SnackBar(
+    content: Text('$credit has its own folder again'),
+    action: SnackBarAction(
+      label: 'Undo',
+      onPressed: () => before == null
+          ? app.forgetFiling(credit)
+          : app.fileArtistUnder(credit, before),
+    ),
+  ));
+}
+
+/// The credits filed into one artist's folder, each removable.
+class _FiledHere extends StatelessWidget {
+  const _FiledHere({required this.app, required this.artist, this.after});
+
+  final AppState app;
+  final String? artist;
+
+  /// Run after a credit is taken out — the sheet showing this closes,
+  /// because the tracks it lists are no longer all this artist's.
+  final VoidCallback? after;
+
+  @override
+  Widget build(BuildContext context) {
+    final credits = _filedInto(app, artist);
+    if (credits.isEmpty) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Shared credits filed here · remove one to give it its own '
+              'folder',
+              style: theme.textTheme.labelSmall),
+          const SizedBox(height: 4),
+          // Scrolls past a couple of rows: Bliss n Eso alone has fourteen
+          // guests, and the records are what this screen is for.
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 84),
+            child: SingleChildScrollView(
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 4,
+                children: [
+                  for (final c in credits)
+                    Tooltip(
+                      message: c,
+                      child: InputChip(
+                        label: Text(_guests(c, artist!),
+                            style: theme.textTheme.labelSmall),
+                        visualDensity: VisualDensity.compact,
+                        onDeleted: () {
+                          _keepSeparate(context, app, c);
+                          after?.call();
+                        },
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// `Lana Del Rey, A$AP Rocky` shown on Lana Del Rey's page as
+  /// `+ A$AP Rocky` — the part that is not already the page's title.
+  static String _guests(String credit, String lead) {
+    if (!credit.toLowerCase().startsWith(lead.toLowerCase())) return credit;
+    final rest = credit
+        .substring(lead.length)
+        .replaceFirst(
+            RegExp(r'^\s*(?:,|;|/|&|＆|、|\+|and|feat\.?|ft\.?|featuring|'
+                r'with|x|vs\.?|[(\[])\s*', caseSensitive: false),
+            '')
+        .replaceFirst(RegExp(r'[)\]]\s*$'), '')
+        .trim();
+    return rest.isEmpty ? credit : '+ $rest';
+  }
+}
+
+class _ArtistPicker extends StatefulWidget {
+  const _ArtistPicker(
+      {required this.artist, required this.others, required this.art});
+
+  final String artist;
+  final List<ArtistShelf> others;
+  final SleeveArt art;
+
+  @override
+  State<_ArtistPicker> createState() => _ArtistPickerState();
+}
+
+class _ArtistPickerState extends State<_ArtistPicker> {
+  String _query = '';
+
+  /// Artists who share a word with this one first — `Ado` for
+  /// `Ado, Miku Hatsune` — since that is nearly always the answer.
+  late final List<ArtistShelf> _ordered = () {
+    final words = _words(widget.artist);
+    int score(ArtistShelf s) =>
+        _words(s.name!).where(words.contains).length;
+    final scored = [for (final s in widget.others) (score(s), s)];
+    final related = [
+      for (final (n, s) in scored)
+        if (n > 0) s,
+    ]..sort((a, b) => score(b).compareTo(score(a)));
+    return [...related, ...widget.others.where((s) => !related.contains(s))];
+  }();
+
+  late final int _relatedCount = () {
+    final words = _words(widget.artist);
+    return widget.others
+        .where((s) => _words(s.name!).any(words.contains))
+        .length;
+  }();
+
+  static Set<String> _words(String name) => {
+        for (final w in normaliseForMatching(name).split(' '))
+          if (w.length >= 2) w,
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final q = _query.trim().toLowerCase();
+    final shown = q.isEmpty
+        ? _ordered
+        : [
+            for (final s in _ordered)
+              if (s.name!.toLowerCase().contains(q)) s,
+          ];
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.75,
+      maxChildSize: 0.95,
+      builder: (context, scroll) => Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('File “${widget.artist}” under…',
+                    style: theme.textTheme.titleMedium
+                        ?.copyWith(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 2),
+                Text(
+                  'The files move into that artist\'s folder. Their tags '
+                  'keep the full credit.',
+                  style: theme.textTheme.bodySmall,
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  decoration: InputDecoration(
+                    isDense: true,
+                    prefixIcon: const Icon(Icons.search),
+                    hintText: 'Find an artist',
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(24)),
+                  ),
+                  onChanged: (v) => setState(() => _query = v),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView.builder(
+              controller: scroll,
+              itemCount: shown.length,
+              itemBuilder: (context, i) {
+                final s = shown[i];
+                final related = q.isEmpty && i < _relatedCount;
+                return ListTile(
+                  leading: SizedBox(
+                    width: 52,
+                    child: Sleeve(album: s.albums.first, art: widget.art, size: 44),
+                  ),
+                  title: Text(s.name!),
+                  subtitle: Text(
+                    '${_plural(s.actions.length, 'file')}'
+                    '${related ? ' · similar name' : ''}',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  onTap: () => Navigator.of(context).pop(s.name),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // ------------------------------------------------------------- the crate
 
 class CrateView extends StatefulWidget {
@@ -72,11 +334,13 @@ class CrateView extends StatefulWidget {
     required this.actions,
     required this.art,
     required this.heroPrefix,
+    required this.part,
   });
 
   final AppState app;
   final List<PlannedAction> actions;
   final SleeveArt art;
+  final PlanPart part;
 
   /// Keeps sleeve animations apart when two crates exist at once, as
   /// they do for a moment while the tabs slide.
@@ -208,6 +472,7 @@ class _CrateViewState extends State<CrateView>
                         shelf: shelves[i],
                         art: widget.art,
                         heroTag: '${widget.heroPrefix}:${shelves[i].key}',
+                        part: widget.part,
                       ),
                     ),
                   );
@@ -243,12 +508,14 @@ class _ArtistRecord extends StatefulWidget {
     required this.shelf,
     required this.art,
     required this.heroTag,
+    required this.part,
   });
 
   final AppState app;
   final ArtistShelf shelf;
   final SleeveArt art;
   final String heroTag;
+  final PlanPart part;
 
   @override
   State<_ArtistRecord> createState() => _ArtistRecordState();
@@ -314,6 +581,8 @@ class _ArtistRecordState extends State<_ArtistRecord>
               title: _albumLabel(shelf.albums.single),
               subtitle: _artistLabel(shelf.name),
               actions: shelf.actions,
+              wholeArtist: shelf.name,
+              part: widget.part,
             )
           : Navigator.of(context).push(MaterialPageRoute(
               builder: (_) => ArtistDialPage(
@@ -321,6 +590,7 @@ class _ArtistRecordState extends State<_ArtistRecord>
                 shelf: shelf,
                 art: widget.art,
                 heroTag: widget.heroTag,
+                part: widget.part,
               ),
             )),
       onHorizontalDragUpdate: _drag,
@@ -362,7 +632,11 @@ class _ArtistRecordState extends State<_ArtistRecord>
                       const SizedBox(height: 2),
                       Text(
                         '${_plural(shelf.albums.length, 'record')} · '
-                        '${_plural(shelf.actions.length, 'file')}',
+                        '${_plural(shelf.actions.length, 'file')}'
+                        '${switch (_filedInto(app, shelf.name).length) {
+                          0 => '',
+                          final n => ' · ${_plural(n, 'shared credit')}',
+                        }}',
                         style: theme.textTheme.bodySmall,
                       ),
                       if (state != Inclusion.all || check > 0)
@@ -557,12 +831,18 @@ class ArtistDialPage extends StatelessWidget {
     required this.shelf,
     required this.art,
     required this.heroTag,
+    required this.part,
   });
 
   final AppState app;
+
+  /// The artist as it was when the page opened. Looked up again on every
+  /// change, because filing a credit in or out rebuilds the plan and
+  /// this page should show what the plan now says.
   final ArtistShelf shelf;
   final SleeveArt art;
   final String heroTag;
+  final PlanPart part;
 
   @override
   Widget build(BuildContext context) {
@@ -570,11 +850,31 @@ class ArtistDialPage extends StatelessWidget {
       listenable: app,
       builder: (context, _) {
         final theme = Theme.of(context);
+        final live = app.plan == null
+            ? null
+            : _liveShelves(app, part)
+                .where((s) => s.key == this.shelf.key)
+                .firstOrNull;
+        if (live == null) {
+          // Filed under someone else: there is nothing left to show.
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (context.mounted) Navigator.of(context).maybePop();
+          });
+          return const Scaffold();
+        }
+        final shelf = live;
         final state = inclusionOf(shelf.actions, app.isRejected);
         return Scaffold(
           appBar: AppBar(
             title: Text(_artistLabel(shelf.name)),
             actions: [
+              if (shelf.name != null)
+                IconButton(
+                  tooltip: 'File under another artist',
+                  icon: const Icon(Icons.drive_file_move_outline),
+                  onPressed: () =>
+                      _fileUnder(context, app, art, part, shelf.name!),
+                ),
               Switch(
                 value: state != Inclusion.none,
                 onChanged: (_) => _flipGroup(context, app, shelf.actions,
@@ -586,6 +886,7 @@ class ArtistDialPage extends StatelessWidget {
           body: SafeArea(
             child: Column(
               children: [
+                _FiledHere(app: app, artist: shelf.name),
                 Expanded(
                   child: shelf.albums.length > 24
                       ? _AlbumGrid(app: app, shelf: shelf, art: art)
@@ -928,6 +1229,8 @@ Future<void> showTracksSheet(
   required String title,
   required String subtitle,
   required List<PlannedAction> actions,
+  String? wholeArtist,
+  PlanPart? part,
 }) {
   return showModalBottomSheet(
     context: context,
@@ -963,6 +1266,23 @@ Future<void> showTracksSheet(
                                     ?.copyWith(fontWeight: FontWeight.w600)),
                             Text(subtitle, style: theme.textTheme.bodySmall),
                             const SizedBox(height: 6),
+                            if (wholeArtist != null && part != null)
+                              TextButton.icon(
+                                style: TextButton.styleFrom(
+                                    padding: EdgeInsets.zero,
+                                    visualDensity: VisualDensity.compact),
+                                icon: const Icon(
+                                    Icons.drive_file_move_outline,
+                                    size: 18),
+                                label: const Text('File under another artist'),
+                                onPressed: () async {
+                                  if (await _fileUnder(context, app, art,
+                                          part, wholeArtist) &&
+                                      context.mounted) {
+                                    Navigator.of(context).pop();
+                                  }
+                                },
+                              ),
                             state == Inclusion.none
                                 ? FilledButton.tonal(
                                     onPressed: () => _flipGroup(
@@ -981,6 +1301,14 @@ Future<void> showTracksSheet(
                   ),
                 ),
               ),
+              if (wholeArtist != null)
+                SliverToBoxAdapter(
+                  child: _FiledHere(
+                    app: app,
+                    artist: wholeArtist,
+                    after: () => Navigator.of(context).pop(),
+                  ),
+                ),
               SliverList.builder(
                 itemCount: actions.length,
                 itemBuilder: (context, i) =>
@@ -1028,6 +1356,7 @@ class _TrackRow extends StatelessWidget {
     final small = theme.textTheme.bodySmall;
     final faint = small?.copyWith(color: theme.colorScheme.onSurfaceVariant);
     final flagged = a.reason.contains('check this one');
+    final shared = a.reason.startsWith('filed under');
 
     final lines = <Widget>[
       if (a.kind == ActionKind.move) ...[
@@ -1041,7 +1370,8 @@ class _TrackRow extends StatelessWidget {
         if (a.kind == ActionKind.trash && a.targetPath != null)
           Text('to the trash folder', style: small),
       ],
-      if (a.reason.isNotEmpty && (a.kind != ActionKind.move || flagged))
+      if (a.reason.isNotEmpty &&
+          (a.kind != ActionKind.move || flagged || shared))
         Text(
           a.reason,
           maxLines: 2,

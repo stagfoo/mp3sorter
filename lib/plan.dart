@@ -109,6 +109,7 @@ class Plan {
     this.stationaryPaths = const {},
     this.blockedMoves = const [],
     this.occupiedPaths = const {},
+    this.filedUnder = const {},
   });
 
   final List<PlannedAction> moves;
@@ -150,6 +151,11 @@ class Plan {
   /// must be free when it runs.
   final Set<String> occupiedPaths;
 
+  /// Artists filed in another artist's folder, as folder → the credits
+  /// folded into it. `Ado` ← `Ado, Miku Hatsune`. Their tags keep the
+  /// full credit; only where the file lives changes.
+  final Map<String, List<String>> filedUnder;
+
   int get actionCount =>
       moves.length + retags.length + trashes.length + art.length;
   bool get isEmpty => actionCount == 0;
@@ -169,6 +175,7 @@ class Plan {
         stationaryPaths: stationaryPaths,
         blockedMoves: blockedMoves,
         occupiedPaths: occupiedPaths,
+        filedUnder: filedUnder,
       );
 }
 
@@ -197,6 +204,8 @@ class PlanOptions {
     this.standardiseArtists = true,
     this.removeDuplicates = false,
     this.trashDirName = '.mp3sorter-trash',
+    this.fileCollaborationsUnderLead = true,
+    this.fileUnder = const {},
   });
 
   /// Where tidied files are filed, under [layout].
@@ -229,6 +238,45 @@ class PlanOptions {
   /// Removed files go here rather than being unlinked, so "undo" means
   /// moving them back rather than restoring from a backup nobody has.
   final String trashDirName;
+
+  /// File `Ado, Miku Hatsune` in `Ado/` when Ado is already an artist in
+  /// the collection. See [leadArtist].
+  final bool fileCollaborationsUnderLead;
+
+  /// Choices made by hand in the review: an artist, as
+  /// [normaliseForMatching] has it, to the artist whose folder it goes
+  /// in. Mapping a name to itself keeps it out of anyone else's folder,
+  /// which is how an automatic fold is undone.
+  final Map<String, String> fileUnder;
+}
+
+/// What separates the names in a shared credit.
+final RegExp _creditSeparator = RegExp(
+  r'\s*(?:,|;|/|&|＆|、|\+|\band\b|\bfeat\.?|\bft\.?|\bfeaturing\b|'
+  r'\bwith\b|\bx\b|\bvs\.?)\s*|\s+[(\[](?=feat|ft|with)',
+  caseSensitive: false,
+);
+
+/// The artist a shared credit belongs under, or null if it is nobody's.
+///
+/// `Ado, Miku Hatsune` → `Ado`, but only because `Ado` is in [known] —
+/// the collection already has an Ado folder for it to join. Without
+/// that check `Mumford & Sons` would be split into a `Mumford` nobody
+/// has heard of; with it, `Mumford & Sons & Dawes` finds the first
+/// known name it starts with.
+///
+/// The first, not the longest: `Lana Del Rey, A$AP Rocky, Playboi Carti`
+/// belongs with Lana Del Rey, even though `Lana Del Rey, A$AP Rocky` is
+/// also a credit the collection has.
+///
+/// [known] maps [normaliseForMatching] of each artist to its spelling.
+String? leadArtist(String credit, Map<String, String> known) {
+  for (final m in _creditSeparator.allMatches(credit)) {
+    if (m.start == 0) continue;
+    final lead = known[normaliseForMatching(credit.substring(0, m.start))];
+    if (lead != null && lead.length < credit.length) return lead;
+  }
+  return null;
 }
 
 /// Builds the plan.
@@ -294,9 +342,52 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
   /// run, and the planner cannot know the order that will happen in.
   final occupied = <String>{for (final t in tracks) t.path.toLowerCase()};
 
+  // Every artist the collection has, so a shared credit can be filed
+  // under one of them. Read the same way the loop below reads them.
+  final known = <String, String>{};
+  for (final track in tracks) {
+    if (!track.isReadable) continue;
+    final raw = inferNames(track).artist ??
+        (options.useFolderHints
+            ? folderHints(track.path, options.sourceRoot).artist
+            : null);
+    if (raw == null || raw.trim().isEmpty) continue;
+    final name = canonical[raw] ?? raw;
+    known.putIfAbsent(normaliseForMatching(name), () => name);
+  }
+
+  final filedUnder = <String, Set<String>>{};
+
+  /// The folder an artist's files go in: their own, unless they were
+  /// filed under someone else by hand or share a credit with an artist
+  /// the collection already has.
+  ///
+  /// Followed to the end: a credit whose lead was itself filed under
+  /// someone by hand goes where the lead went. Bounded, because two
+  /// hand-made choices can point at each other.
+  String folderFor(String artist) {
+    var folder = artist;
+    final seen = <String>{};
+    while (seen.add(normaliseForMatching(folder))) {
+      final next = options.fileUnder[normaliseForMatching(folder)] ??
+          (options.fileCollaborationsUnderLead
+              ? leadArtist(folder, known)
+              : null);
+      if (next == null || next == folder) break;
+      folder = next;
+    }
+    if (folder != artist) {
+      filedUnder.putIfAbsent(folder, () => {}).add(artist);
+    }
+    return folder;
+  }
+
   /// Tracks that can be filed, with the names to file them under.
   /// Collected in the first pass and assigned targets in the second.
   final wanted = <(Track, String, String, String?, bool, bool)>[];
+
+  /// The full credit of a file being filed under someone else's folder.
+  final credits = <String, String>{};
 
   for (final track in tracks) {
     if (doomed.contains(track.path)) continue;
@@ -346,7 +437,7 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
           title: newTitle,
           genres: newGenres,
           reason: _retagReason(track, newArtist, newTitle, newGenres),
-          shelfArtist: artist,
+          shelfArtist: artist == null ? null : folderFor(artist),
           shelfAlbum: album,
         ));
       }
@@ -366,8 +457,16 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
         // the original filename.
         unsortable.add(track);
       } else {
-        wanted.add(
-            (track, artist, title, album, names.fromTags, guessedFromFolder));
+        // The folder name changes; the tag keeps the whole credit.
+        wanted.add((
+          track,
+          folderFor(artist),
+          title,
+          album,
+          names.fromTags,
+          guessedFromFolder,
+        ));
+        if (folderFor(artist) != artist) credits[track.path] = artist;
       }
     }
   }
@@ -479,9 +578,11 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
           // Flagged, because this is the weakest of the three sources
           // and the one most worth a glance before it is acted on.
           ? 'from the folder name — check this one'
-          : fromTags
-              ? 'from tags'
-              : 'from the filename — tags were missing',
+          : credits[track.path] != null
+              ? 'filed under $artist — credited to ${credits[track.path]}'
+              : fromTags
+                  ? 'from tags'
+                  : 'from the filename — tags were missing',
     ));
   }
 
@@ -500,6 +601,9 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
     stationaryPaths: stationary,
     blockedMoves: ordered.blocked,
     occupiedPaths: occupied,
+    filedUnder: {
+      for (final e in filedUnder.entries) e.key: e.value.toList()..sort(),
+    },
   );
 }
 

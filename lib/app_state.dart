@@ -17,6 +17,7 @@ import 'cover_art.dart';
 import 'diagnostics.dart';
 import 'duplicates.dart';
 import 'index_store.dart';
+import 'levenshtein.dart';
 import 'plan.dart';
 import 'recent_folders.dart';
 import 'scanner.dart';
@@ -246,8 +247,30 @@ class AppState extends ChangeNotifier {
         cleanQualityTags: options.cleanQualityTags,
         standardiseArtists: options.standardiseArtists,
         removeDuplicates: options.removeDuplicates,
+        fileUnder: fileUnder,
       ),
     );
+  }
+
+  /// Artists filed under someone else's folder by hand, keyed by
+  /// [normaliseForMatching]. Kept here rather than in [options] because
+  /// the settings rebuild those from scratch, and a choice made in the
+  /// review should survive a toggle on the home screen.
+  Map<String, String> fileUnder = const {};
+
+  /// Files [artist] in [folder]'s folder — or, when they are the same,
+  /// keeps [artist] in its own even if it shares a credit with someone.
+  void fileArtistUnder(String artist, String folder) {
+    fileUnder = {...fileUnder, normaliseForMatching(artist): folder};
+    _rebuildPlan();
+    notifyListeners();
+  }
+
+  /// Forgets a choice made with [fileArtistUnder].
+  void forgetFiling(String artist) {
+    fileUnder = {...fileUnder}..remove(normaliseForMatching(artist));
+    _rebuildPlan();
+    notifyListeners();
   }
 
   // ------------------------------------------------------- the review

@@ -15,6 +15,11 @@ void main(List<String> args) async {
       scan.tracks,
       PlanOptions(root: '${root.path}/_sorted', sourceRoot: root.path));
 
+  print('── filed under another artist: ${plan.filedUnder.length} folders ──');
+  for (final e in plan.filedUnder.entries) {
+    print('  ${e.key}  ←  ${e.value.join("  ·  ")}');
+  }
+
   for (final (label, actions) in [
     ('moves', plan.moves),
     ('tags', plan.retags),
