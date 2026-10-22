@@ -13,7 +13,9 @@ library;
 import 'package:flutter/material.dart';
 
 import 'app_state.dart';
+import 'crate_view.dart';
 import 'plan.dart';
+import 'sleeve_art.dart';
 
 class ReviewScreen extends StatefulWidget {
   const ReviewScreen({super.key, required this.app});
@@ -26,6 +28,10 @@ class ReviewScreen extends StatefulWidget {
 
 class _ReviewScreenState extends State<ReviewScreen> {
   AppState get app => widget.app;
+
+  /// Lives as long as the review, so covers seen once are not read from
+  /// the files again on every flick through the crate.
+  final _art = SleeveArt();
 
   @override
   void initState() {
@@ -74,8 +80,16 @@ class _ReviewScreenState extends State<ReviewScreen> {
             Expanded(
               child: TabBarView(
                 children: [
-                  _ActionList(app: app, actions: plan.moves, showTarget: true),
-                  _ActionList(app: app, actions: plan.retags),
+                  CrateView(
+                      app: app,
+                      actions: plan.moves,
+                      art: _art,
+                      heroPrefix: 'moves'),
+                  CrateView(
+                      app: app,
+                      actions: plan.retags,
+                      art: _art,
+                      heroPrefix: 'tags'),
                   _ActionList(app: app, actions: plan.trashes,
                       showTarget: false),
                   _Skipped(app: app),

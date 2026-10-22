@@ -47,6 +47,8 @@ class PlannedAction {
     this.genres,
     this.artFrom,
     this.reason = '',
+    this.shelfArtist,
+    this.shelfAlbum,
   });
 
   final ActionKind kind;
@@ -77,6 +79,16 @@ class PlannedAction {
   /// Why, in words, for the review list. A plan nobody can read is a
   /// plan nobody can check.
   final String reason;
+
+  /// Who and which record this file is, as the planner understood it.
+  /// Not a tag write — [artist] is that. This is for grouping the
+  /// review, because a list of five thousand filenames gives nobody
+  /// enough to judge whether `Bomb.mp3` is going somewhere sensible,
+  /// and a record sleeve with an artist on it does.
+  ///
+  /// Null when the planner could not tell, which is itself worth seeing.
+  final String? shelfArtist;
+  final String? shelfAlbum;
 
   bool get changesTags =>
       artist != null || title != null || genres != null;
@@ -254,6 +266,8 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
         trashes.add(PlannedAction(
           kind: ActionKind.trash,
           path: t.path,
+          shelfArtist: inferNames(t).artist,
+          shelfAlbum: t.album,
           targetPath: '${options.root}/${options.trashDirName}/'
               '${safeComponent(t.path.split('/').last)}',
           reason: switch (group.kind) {
@@ -332,6 +346,8 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
           title: newTitle,
           genres: newGenres,
           reason: _retagReason(track, newArtist, newTitle, newGenres),
+          shelfArtist: artist,
+          shelfAlbum: album,
         ));
       }
     }
@@ -443,6 +459,8 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
       kind: ActionKind.move,
       path: track.path,
       targetPath: target,
+      shelfArtist: artist,
+      shelfAlbum: album,
       reason: fromFolder
           // Flagged, because this is the weakest of the three sources
           // and the one most worth a glance before it is acted on.
