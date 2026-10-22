@@ -795,9 +795,11 @@ void _layoutTests() {
       final targets = p.moves.map((m) => m.targetPath).toList();
       expect(targets,
           contains('/M/_sorted/Wolfmother/Wolfmother/02 Woman.mp3'));
-      // The self-titled track collapses out of the folder, which is the
-      // documented trade: the rule looks at one file at a time.
-      expect(targets, contains('/M/_sorted/Wolfmother/Wolfmother.mp3'));
+      // The self-titled track stays with its album. It used to collapse
+      // out beside the folder, splitting the record — seen on a real
+      // collection as `Disturbed/Asylum.mp3` next to `Disturbed/Asylum/`.
+      expect(targets,
+          contains('/M/_sorted/Wolfmother/Wolfmother/05 Wolfmother.mp3'));
     });
 
     test('the flat layout is still available', () {

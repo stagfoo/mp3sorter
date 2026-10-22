@@ -372,6 +372,15 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
     }
   }
 
+  /// How many tracks each album has, so a single can be told apart
+  /// from a title track.
+  final albumSizes = <String, int>{};
+  for (final (_, artist, _, album, _, _) in wanted) {
+    if (album == null) continue;
+    final k = _albumKey(artist, album);
+    albumSizes[k] = (albumSizes[k] ?? 0) + 1;
+  }
+
   /// Where a track belongs, under the chosen layout.
   ///
   /// The album folder is used only when the file actually carries an
@@ -394,8 +403,13 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
     // is a directory that exists to hold a file of the same name.
     // Compared after normalisation, since the two spellings rarely match
     // character for character.
+    //
+    // Only when it really is alone, though. `Disturbed/Asylum` holds a
+    // song called Asylum and eleven others, and pulling that one out of
+    // its album to sit beside the folder split the record in two.
     final albumIsTheTitle = album != null &&
-        normaliseForMatching(album) == normaliseForMatching(title);
+        normaliseForMatching(album) == normaliseForMatching(title) &&
+        (albumSizes[_albumKey(artist, album)] ?? 0) <= 1;
 
     if (options.layout == Layout.artistTitle ||
         album == null ||
@@ -488,6 +502,9 @@ Plan buildPlan(List<Track> tracks, PlanOptions options) {
     occupiedPaths: occupied,
   );
 }
+
+String _albumKey(String artist, String album) =>
+    '${normaliseForMatching(artist)}\u0000${normaliseForMatching(album)}';
 
 /// The result of working out a safe order for a set of moves.
 class OrderedMoves {
