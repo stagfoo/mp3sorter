@@ -1,5 +1,5 @@
 name: mp3sorter
-description: "A new Flutter project."
+description: "Swipe through a folder of tracks and fix their tags, one card at a time."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -31,12 +31,14 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # The following adds the Cupertino Icons font to your application.
-  # Use with the CupertinoIcons class for iOS style icons.
-  cupertino_icons: ^1.0.8
-  audio_metadata_reader: ^1.8.0
+  # Reads and writes ID3v2, FLAC, MP4 and RIFF tags in pure Dart, so there is
+  # no Rust toolchain or native build to keep working. Proven on this
+  # collection by the previous version of the app.
+  audio_metadata_reader: 1.8.1
+  just_audio: ^0.10.6
   path: ^1.9.1
-  crypto: ^3.0.7
+  # Pinned to the version the previous release shipped with and built cleanly
+  # on this toolchain, rather than ^-ranged into an untested major.
   file_picker: 13.1.0
   permission_handler: ^13.0.2
   path_provider: ^2.1.6

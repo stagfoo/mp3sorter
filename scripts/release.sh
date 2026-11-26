@@ -50,7 +50,7 @@ sed -i "s/^version: .*/version: $next_version+$next_build/" pubspec.yaml
 
 # The bug report prints a version, and a stale one there sends whoever
 # reads it looking at the wrong build.
-sed -i "s/^const String kAppVersion = .*/const String kAppVersion = '$next_version';/" lib/version.dart
+sed -i "s/^const String kAppVersion = .*/const String kAppVersion = '$next_version';/" lib/core/version.dart
 
 flutter pub get
 flutter analyze

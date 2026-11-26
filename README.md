@@ -1,417 +1,106 @@
-# MP3 Sorter
+# mp3sorter
 
-Tidies a messy MP3 collection: writes tags, files everything as
-`Artist/Title.mp3`, reconciles artist spellings with Levenshtein
-matching, finds duplicates, and marks low-bitrate files.
+Swipe through a folder of music, one card per track, and fix the tags as
+you go.
 
-**Nothing is written until you have seen the full list and said yes**, and
-every run can be undone. On a collection with no backup that is not a
-nicety — a rename rule that is subtly wrong gets applied five thousand
-times before anyone notices.
+| Gesture | Key | What happens |
+| --- | --- | --- |
+| Swipe **right** | → / Enter | Save the tags on the card |
+| Swipe **left** | ← | Skip — the file is not touched |
+| Swipe **up** | ↑ | Save, then give the rest of the folder this card's album, album artist, year, genre and cover |
+| | ↓ / Backspace | Bring back the last skipped track |
+| | Space | Play / pause |
+| | 1–9 | Pick a suggestion |
+| | E | Show / hide the fields |
+| | Ctrl+Z | Undo the last save (a whole batch at once) |
 
-Runs on Android and on Linux desktop from one codebase.
+Each card plays the track (at medium volume, with a scrubber) so you can
+hear what you are tagging. Under it are **suggestions** — what the file is
+tagged as now, what its filename and folders say, and matches from
+MusicBrainz — and the **fields**, editable inline.
 
-## What it does
+Version 1.0.13 and earlier were a different app (bulk renaming, duplicate
+finding, bitrate reports). This replaces it.
 
-| | |
-| --- | --- |
-| **Scan** | Reads tags and frame headers. Read-only, always. |
-| **Quality** | Real bitrate from the MPEG frames, banded and browsable. Computed every scan, never written to the file. |
-| **Artists** | Levenshtein clustering finds `ColdPlay` / `Coldplay` and standardises them. |
-| **Duplicates** | Three kinds — identical bytes, same audio different tags, same song different encodings. |
-| **Plan** | Every proposed change listed and individually rejectable. |
-| **Undo** | A journal of what was done, reversed newest-first. |
+## What it will not do to your files
 
-## Measured on a real collection
+The previous app left a phone library with missing covers and damaged
+tags. Everything here is built against that:
 
-5,303 files, 25 GB, scanned in 21 seconds:
+- **Only fields you changed are written.** Re-writing a field with what it
+  already says is not harmless: a genre of `Jazz/Blues/Rock` reads back as
+  `Jazz`, and writing `Jazz` would lose the other two.
+- **Every other tag survives.** MP3s are edited frame by frame
+  (`lib/core/id3.dart`), so comments, lyrics, ReplayGain, iTunes and
+  Windows Media frames are copied through byte for byte. The tag library's
+  own writer was tested against a real file first and dropped the comment,
+  the normalisation data and seven PRIV frames — which is why it is not
+  used for MP3.
+- **Covers are added, never replaced or dropped.** A track with no cover
+  gets the folder's `cover.jpg`/`folder.jpg`, or the Cover Art Archive's
+  for the chosen release. A write that would leave a file with fewer
+  pictures than it had is refused.
+- **Writes are atomic.** The file is copied next to itself, tagged, read
+  back with a *different* parser to check the tags and covers landed and
+  the audio length is unchanged, and only then renamed over the original.
+  A crash at any point leaves the original as it was.
+- **Undo is exact.** For MP3 the original tag block is kept and put back
+  byte for byte — verified on a phone, the file after undo is identical to
+  the file before the save.
 
-```
-low quality    1,508      duplicates   698 groups
-acceptable     3,223                   750 removable
-good             112                   5.33 GB reclaimable
-high             454
-unreadable         6      plan         5,069 moves
-no usable tags   228                   1,597 tag writes
-                                       234 left alone
-                                       0 validation problems
-```
+Formats: MP3 (frame-level editor), FLAC, M4A, WAV (tag library). Ogg and
+Opus are read and played but not written; their cards say so.
 
-The artist merges it found were all correct, including a genuine typo:
-`Haijime Wakai, Kuzumi Totaka` → `Hajime Wakai, Kazumi Totaka`.
+## Online, and offline
 
-## The bitrate is read here, not taken from a tag library
+MusicBrainz (no key needed, data is CC0) is searched by title and artist,
+then by title alone — many records are credited to a name the tags do not
+use (`シートベルツ` rather than `The Seatbelts`). Candidates are ranked by
+how close the recording's length is to the file's, and labelled by release
+type: Official Release, Single, Live, Remix, Acoustic, Compilation,
+Soundtrack.
 
-`audio_metadata_reader` reports **64 kbps / 22050 Hz for files that are
-really 128 kbps / 44100 Hz** — exactly half of both, the signature of
-misreading the two MPEG version bits and then indexing the MPEG2 bitrate
-table instead of the MPEG1 one. Checked against `ffprobe`, it was wrong
-on six of seven sampled files. A `low quality` flag built on that would
-have condemned most of a library.
+Requests are paced at just over one a second, as MusicBrainz asks, with a
+User-Agent naming the app. Every successful response is cached on disk,
+so a folder looked up once can be worked through again with no signal.
+Offline, the card says so, offers a retry, and the filename and folder
+suggestions still work.
 
-So `lib/bitrate.dart` reads the frame headers itself. Against ffprobe's
-**stream** bitrate it is now **75 of 75 exact**.
+**Last.fm genres** are optional: add a free API key on the home screen.
 
-Two things that took getting right:
+**AcoustID** (identifying a track by audio fingerprint) is not included:
+it needs Chromaprint's native fingerprinting, which would put a native
+build back into an app that currently has none.
 
-- **Compare against `stream=bit_rate`, not `format=bit_rate`.** The
-  format figure is file size ÷ duration, so it includes the ID3 tag and
-  embedded album art — on a short track with a big cover that reads 25%
-  high, and comparing against it made a correct parser look wrong.
-- **Probing at even byte offsets over-samples loud passages**, because
-  high-bitrate frames occupy more bytes. The arithmetic mean of such a
-  sample reported 243 kbps where the truth was 224. The **harmonic mean**
-  of byte-uniform samples recovers the time-weighted average exactly,
-  which is what "the bitrate of this file" means.
+## Progress
 
-A Xing/Info/VBRI header is used when present, since it describes the
-whole file exactly and no amount of sampling can.
-
-### Quality is computed, not stored
-
-Versions up to 1.0.3 wrote a `low quality` genre into files below 128k.
-That was wrong, and 1.0.4 removes it.
-
-Bitrate is derived from the file in about two milliseconds. Writing it
-into a tag spent a **real metadata field** — one the owner may have set
-themselves — to save a computation that is free, and left 1,500 files
-carrying a genre no music player should be showing. Derived data belongs
-in the view, not in the thing it was derived from.
-
-So quality is now computed at every scan, shown banded on the home
-screen, and **tappable**: each band opens the list of files in it, worst
-first, with the bitrate, sample rate, channel count and size that produced
-the verdict. The point of knowing a file is poor is to go and re-source
-it, and for that you want a list you can read — not a marker buried in
-metadata.
-
-The one genre change the app still makes is **taking that marker back**
-from files an earlier version wrote it to. It is on by default and only
-ever removes.
-
-## Levenshtein, and why normalisation is most of it
-
-Raw edit distance says `The Beatles` and `Beatles` are four apart — on a
-seven-character string that is a similarity of 0.64, below any sane
-threshold, so the match is missed. Strip the article first and they are
-identical. The distance function is the easy half.
-
-The normalisation rules each came from a real pattern: leading and
-trailing articles, `&` versus `and`, `(Remastered 2011)` and `[Explicit]`,
-`feat. Jay-Z`, leading track numbers, initialisms like `N.W.A.` that must
-collapse to `nwa` rather than `n w a`.
-
-Release noise is a **fixed list of known-noise words**, not "strip all
-brackets": `(Don't Fear) The Reaper` and `(I Can't Get No) Satisfaction`
-are real titles, and discarding their parentheses would merge genuinely
-different songs.
-
-All-pairs comparison over a collection is affordable because of
-`levenshteinWithin`, which abandons a comparison as soon as it exceeds
-the budget — and rejects outright on a length difference, which costs
-nothing and eliminates most pairs.
-
-## Three kinds of duplicate
-
-1. **Identical bytes** — a copy, or a Syncthing conflict file.
-2. **Same audio, different tags** — one rip tagged twice. The files
-   differ in size *because* the tags differ, so a size comparison misses
-   it entirely. The commonest kind.
-3. **Same song, different encodings** — a 128k and a 320k rip. Only names
-   to go on, so a duration check guards it: a three-minute radio edit and
-   a six-minute album version share artist and title and are not
-   duplicates.
-
-The fingerprint hashes the **audio frames only**, skipping the ID3 tag,
-which is what makes case 2 findable. It samples 64 KB from each end plus
-the exact audio length rather than hashing 25 GB.
-
-Which copy to keep: best bitrate first (the only difference that cannot
-be fixed later), then longest (catching a truncated download), then
-tagged over untagged, then the one already filed somewhere sensible.
-
-## Recent folders
-
-Scanned folders are remembered and offered on the home screen, with the
-file count last seen and enough of the parent path to tell two folders
-called `Music` apart.
-
-**An entry whose folder is not currently mounted stays in the list**,
-greyed, rather than being pruned. A collection on a removable card lives
-at a path that simply does not exist while the card is out — dropping it
-then would empty the list at exactly the moment remembering was useful.
-Existence is checked when the row is drawn, never as a reason to forget.
-
-## Saving and reloading a scan
-
-Scanning 3,000 files off an SD card takes **163 seconds on a phone**.
-Without a way to save that, every change of mind about a setting costs
-another three minutes, so in practice settings do not get changed and the
-plan does not get examined properly.
-
-- **Save scan** writes a `.json` beside the collection that loads back
-  exactly as scanned.
-- **Save report** writes a `.txt` — every proposed move, duplicate group
-  and artist merge in full. A 5,000-row list is not reviewable on a
-  phone, and pretending otherwise is how a plan gets approved unread.
-
-Both are written next to the music rather than through a save dialog: the
-folder is already known to be writable, and a file beside the collection
-is easier to find again than one in a picker's idea of "Documents".
-
-A loaded scan describes the collection *as it was*, so it is marked
-out-of-date until **Check files** has confirmed the paths are still
-there — one stat per file, far cheaper than a rescan.
-
-## Safety
-
-- **Plan, review, apply.** Actions start accepted — the review is for
-  spotting what is wrong, and making someone tick 5,000 boxes is how a
-  review gets skipped.
-- **Nothing is ever unlinked.** Removed duplicates move to a trash folder,
-  which makes undoing a deletion the same operation as undoing a move.
-- **The journal is written before the next action runs**, so an
-  interrupted run leaves an accurate record of how far it got. JSON Lines,
-  because a half-written array is unparseable and loses everything.
-- **An existing target is refused, never overwritten** — the one mistake
-  with no undo.
-- **A failure does not abandon the run.** One unwritable file should not
-  cost four thousand good changes; the journal records which failed, and
-  the screen names them rather than only counting them.
-- **Files with no usable artist are left exactly where they are.**
-  Filing them as `Unknown Artist/` would overwrite the filename, which is
-  the only clue they have left.
+Progress through each folder is saved as you go, so closing the app half
+way through four hundred tracks resumes where you were. The undo history
+survives restarts too (the last 2,000 saves).
 
 ## Layout
 
-Everything that decides anything is plain Dart with no Flutter and no
-plugin imports, so it tests with no device attached.
-
-| File | Does |
-| --- | --- |
-| `lib/levenshtein.dart` | Distance, early-abort distance, normalisation, clustering |
-| `lib/bitrate.dart` | MPEG frame headers, Xing, quality bands |
-| `lib/track.dart` | The model, name inference, filesystem-safe names |
-| `lib/duplicates.dart` | Grouping and which copy to keep |
-| `lib/plan.dart` | What would change, and validating it |
-| `lib/apply.dart` | Doing it, journalling it, undoing it |
-| `lib/scanner.dart`, `lib/file_source.dart` | The parts that touch disk |
-
-**132 tests.** `tool/verify_bitrate.dart` and `tool/dry_run.dart` are not
-tests — they run against a real collection and need `ffprobe`.
-
-## The bug report
-
-A bug icon in the app bar, and a button on any failed run, opens a
-report with a **Copy everything** button. It carries the version,
-platform, collection size, plan shape, and **every** failure — not the
-first eight.
-
-That last part is the point. Two bugs were diagnosed from screenshots
-that truncated at eight failures with "…and 112 more", and both times the
-pattern across the remaining hundred was the diagnosis. The report also
-groups failures by cause rather than by file, so a hundred instances of
-one problem read as one problem.
-
-It can also be saved beside the music, for when it is too long to paste.
-
-## Where a file ends up
-
-Default layout is `Artist/Album/01 Title.mp3`. The flat `Artist/Title.mp3`
-is still available.
-
-Three sources, each a weaker claim than the one before:
-
-1. **Tags.** Artist, title, album, track number.
-2. **The filename.** `Artist - Title.mp3`, and a leading number is read
-   as the track number rather than discarded — `05 Where Eagles Have
-   Been.mp3` is track 5, so the name round-trips. A filename that is only
-   a number (`1979.mp3`) keeps it as the title.
-3. **The folders.** The immediate parent is the album, the one above it
-   the artist. Marked in the review as *"from the folder name — check
-   this one"*, because it is a guess.
-
-The folder rule is deliberately structural rather than clever. A file at
-`Music/[2009] Cosmic Egg/01 Cosmic Egg.mp3` has one folder above it, so
-it yields an album and **no artist** — the folder is the album, and
-reading it as the artist would file the record under a band called Cosmic
-Egg. A hint that is sometimes wrong is worse than no hint, because it is
-wrong silently. Those files stay unsortable and are reported.
-
-Year prefixes (`[2005] `, `(2005) `, `2005 - `) and trailing catalogue
-numbers (`2019_norman-fucking-rockwell_218434`) are stripped.
-
-**A single gets no album folder.** When the album is named after its one
-track, `Creepy Nuts/Bling-Bang-Bang-Born/Bling-Bang-Bang-Born.mp3` is a
-directory whose only job is to hold a file of the same name — 135 of
-those in a real collection. Compared after normalisation, so
-`Otonoke (Single)` counts as matching `Otonoke`.
-
-On the real collection this files 5,114 of 5,303 and converges on a
-second pass.
-
-## A failed move must leave nothing behind
-
-`rename` fails across filesystems, and on Android it fails on a removable
-card for reasons of its own, so the copy-and-delete fallback is not
-exotic — on the device that found this it was the normal path.
-
-The version without that guarantee did this:
-
-```dart
-final copied = await source.copy(target);
-await source.delete();     // if this throws, BOTH files now exist
 ```
-
-The exception propagated, the action was reported as **failed**, and a
-duplicate was left behind: the original still in place and a copy at the
-destination. The owner saw folders that looked untouched while the app
-insisted the files had been filed, and the duplicate count climbed every
-run — 244 groups of it.
-
-Now the copy is undone before the failure is reported, so a failed move
-changes nothing. The regression test was checked against the old
-implementation to confirm it actually fails there; a test that passes on
-the broken code is decoration.
-
-## What has actually been done
-
-The bug report reads the journal and says how many moves, retags and
-removals have really happened, with sample before/after paths. "Did it
-move my files or not" was not answerable from anything else on screen,
-and guessing at it cost a round of changes.
-
-## Two notions of "taken"
-
-The bug that reached a device four separate times, each fix revealing the
-next layer, and all of it one confusion:
-
-- **assigned** — names the planner has handed to a move
-- **occupied** — names files are sitting on *right now*
-
-A file may be given a name it already occupies; that is how a file stays
-put. It may **not** be given a name another file occupies, even if that
-file looks like it is leaving — whether it leaves depends on decisions
-not yet made.
-
-The version that conflated them did this:
-
-```dart
-claimed.remove(track.path);   // "my own path shouldn't block me"
+lib/core/   pure Dart, no Flutter — all of it tested
+  tags.dart        TagSet and Candidate
+  id3.dart         frame-preserving ID3v2 editor
+  tag_io.dart      atomic read/write/undo on real files
+  guess.dart       tags from filenames and folder names
+  musicbrainz.dart recording search → candidates
+  lastfm.dart      genre suggestions
+  net.dart         pacing, caching, one GET
+  library.dart     folder scan, queue order, folder covers, batch targets
+  store.dart       session progress, undo journal, settings
+lib/ui/     the app
+  tagger.dart      state: queue, player, lookups, writes, undo
+  swipe_screen.dart, home_screen.dart, theme.dart
 ```
-
-which removed a claim *another file had already made on that path*. So
-`Megitsune (2).mp3` was assigned `Megitsune (320k).mp3`, then
-`Megitsune (320k).mp3` was processed, cancelled that claim because the
-path was its own, and stayed exactly where it was — leaving a planned
-move pointing at a file that never moved.
-
-The cost of fixing it properly is that a file can no longer take a name
-another file is vacating, so it gets a suffix and settles on the next
-run. **A tidier that takes two passes beats one that fails.**
-
-`validatePlan` now walks the plan the way the applier will and asserts
-every destination is free at the moment its move runs, which catches the
-whole family however a future change reintroduces it.
-
-## Rename ordering
-
-Moves are ordered so a file never lands on a name that is still occupied
-when its turn comes.
-
-This is the third bug of one family to reach a device, and the subtlest.
-Three files sharing tags compete for one name and get suffixes. On a
-rescan the planner reassigns those suffixes — and the assignment is a
-*permutation of names that already exist*:
-
-```
-Megitsune (2).mp3     -> Megitsune (320k).mp3   ← occupied right now
-Megitsune (320k).mp3  -> Megitsune.mp3
-```
-
-Each move is fine on its own; in that order the first one fails. Treating
-a path as free because its occupant is leaving is only true once the
-occupant has actually left.
-
-`orderMoves` is a topological sort over "this move must wait for that
-one". A cycle — two files swapping names — cannot be done without a
-temporary name, so those are reported rather than half-attempted.
-
-## Planning happens in two passes
-
-Where a file can go depends on which names will still be occupied
-afterwards, and that is not known until every track has been considered.
-So the planner first works out which files are staying put — already
-correctly named, or unfilable — claims those names, and only then assigns
-moves.
-
-The single-pass version shipped in 1.0.x and was wrong in a way that only
-showed up on a **rescan of an already-sorted folder**. A file already at
-its correct name was skipped without reserving that name, so the next file
-with identical tags was planned straight onto it:
-
-```
-Megitsune.mp3          already correct → skipped, name not claimed
-Megitsune (134k).mp3   → planned onto Megitsune.mp3   ← collides
-Megitsune (2).mp3      → planned onto Megitsune (134k).mp3  ← collides
-```
-
-On a real device that was 120 failures in one run. `validatePlan` now
-catches the whole class — a move aimed at a name something else is
-keeping — so it would fail the plan rather than the apply.
-
-A second fix came with it: disambiguation can hand a file back **its own**
-name, since a file already called `Title (134k).mp3` whose plain target is
-taken disambiguates to exactly where it already is. That produced
-move-to-self actions, which is why a second run over a tidy folder never
-settled. The plan now converges — verified on the real collection, where
-a second pass finds zero moves.
-
-## A bug this app shipped with, and how it looked
-
-On a real device the first run worked, and then the screen said **0
-applied, 249 failed**, every line reading *"file no longer exists"*.
-
-Nothing was missing. The first run had already moved those files, and the
-plan still on screen was built from the scan taken *before* it — so every
-path in it pointed at where the file used to be. The app let that stale
-plan be applied again, and then reported the consequence in the least
-helpful words available.
-
-Three things were wrong, and all three are fixed:
-
-- **The plan survived the run that invalidated it.** A scan is now marked
-  out-of-date as soon as anything moves, and the Apply button is disabled
-  until it is rechecked or redone.
-- **Nothing on screen said so.** There is now a banner on both the home
-  and review screens explaining that files have moved and offering the
-  one-tap recheck.
-- **The error blamed the collection.** It now says the plan is out of
-  date rather than that a file has vanished, which is what was actually
-  true.
-
-## Two upstream bugs worked around
-
-**The Dart JIT crashes on this workload.** A hot loop over an
-externally-backed `Uint8List` — what `RandomAccessFile.readSync` returns —
-kills the VM in `FlowGraph::InsertConversion` with *illegal conversion
-untagged→tagged*. AOT builds are unaffected, so a release APK would have
-shipped fine and **every debug run would have died**. `FileByteSource`
-copies each read into a plain list, which costs nothing against the disk
-access it follows.
-
-**`permission_handler_android` needs compileSdk 37**, above the 36 that
-Flutter 3.47.0 resolves to. Overridden explicitly in
-`android/app/build.gradle.kts`; the failure is at `checkDebugAarMetadata`
-before any app code compiles.
 
 ## Android storage
 
-Bulk renaming across the user's storage needs **all-files access**
-(`MANAGE_EXTERNAL_STORAGE`). Scoped storage deliberately cannot do it —
-SAF grants per-tree handles, not the arbitrary cross-directory moves that
-are this app's entire purpose. Android only grants it from its own
-settings screen, and the app degrades to read-only reporting without it.
+Writing tags into files across shared storage needs **all-files access**
+(`MANAGE_EXTERNAL_STORAGE`), granted from Android's own settings screen.
+It is asked for when a folder is opened, not at launch.
 
 ## Building
 
@@ -424,19 +113,6 @@ flutter build apk --release --target-platform android-arm64 --split-per-abi
 
 `flutter analyze` and `flutter test` never touch Gradle, so run a release
 build after any change to the Android side.
-
-### Linux desktop
-
-The desktop target is scaffolded but needs a toolchain Flutter does not
-ship:
-
-```sh
-sudo dnf install -y clang cmake ninja-build gtk3-devel
-flutter build linux --release
-```
-
-That is the build that can reach a collection on a PC. The pure core runs
-either way — `tool/dry_run.dart` works today with no toolchain at all.
 
 ### Signing
 
@@ -460,16 +136,5 @@ Only ever through `scripts/release.sh`: it bumps the version, commits,
 pushes, and verifies with `aapt2` that the APK carries the new version
 before uploading. Releases are shaped to Obtainium's defaults — bare
 version tag, one APK asset, version and build number bumped every time.
-
-## What it deliberately doesn't do
-
-- **Look anything up online.** No MusicBrainz, no cover art fetching. It
-  works from what is already in your files.
-- **Guess an artist.** A file called `1739349830600.mp3` is reported, not
-  invented into `Unknown Artist/`.
-- **Delete anything.** Duplicates go to a trash folder you empty yourself.
-- **Write derived data into your files.** Quality is recomputed each scan.
-  The only tag writes are artist and title, which are real metadata.
-- **Handle FLAC, M4A or OGG.** The frame parser is MP3-specific. The tag
-  library covers more, but the quality analysis — the point of the thing —
-  does not.
+The application id is unchanged from the old app, so Obtainium updates it
+in place.
